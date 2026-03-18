@@ -1,11 +1,26 @@
 const CACHE_NAME = 'unch-v1';
 const API_CACHE_NAME = 'unch-api-v1';
 
+// Список файлов для кэширования - УБЕДИТЕСЬ, ЧТО ВСЕ ФАЙЛЫ СУЩЕСТВУЮТ!
 const STATIC_URLS = [
   '/',
   '/index.html',
   '/css/styles.css',
   '/manifest.json',
+  '/js/config.js',
+  '/js/api.js',
+  '/js/utils.js',
+  '/js/auth.js',
+  '/js/app.js',
+  '/js/orders.js',
+  '/js/reviews.js',
+  '/js/bonuses.js',
+  '/js/profile.js',
+  '/js/admin.js'
+];
+
+// Опциональные файлы (иконки) - если их нет, не будем ломать кэш
+const OPTIONAL_URLS = [
   '/icons/icon-72x72.png',
   '/icons/icon-96x96.png',
   '/icons/icon-128x128.png',
@@ -13,25 +28,55 @@ const STATIC_URLS = [
   '/icons/icon-152x152.png',
   '/icons/icon-192x192.png',
   '/icons/icon-384x384.png',
-  '/icons/icon-512x512.png'
+  '/icons/icon-512x512.png',
+  '/favicon.ico'
 ];
 
-const API_URLS = [
-  '/api/reviews',
-  '/api/health'
-];
-
-// Установка - кэшируем статику
+// Установка - кэшируем только существующие файлы
 self.addEventListener('install', event => {
   console.log('Service Worker installing...');
   
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => {
+      .then(async cache => {
         console.log('Caching static files');
-        return cache.addAll(STATIC_URLS);
+        
+        // Кэшируем основные файлы по одному с проверкой
+        const results = await Promise.allSettled(
+          STATIC_URLS.map(async url => {
+            try {
+              const response = await fetch(url);
+              if (response.ok) {
+                await cache.put(url, response);
+                console.log(`✅ Cached: ${url}`);
+              } else {
+                console.warn(`⚠️ Failed to fetch ${url}: ${response.status}`);
+              }
+            } catch (error) {
+              console.warn(`⚠️ Error caching ${url}:`, error.message);
+            }
+          })
+        );
+        
+        console.log(`Cached ${results.filter(r => r.status === 'fulfilled').length} files`);
+        
+        // Пробуем кэшировать опциональные файлы (игнорируем ошибки)
+        await Promise.allSettled(
+          OPTIONAL_URLS.map(async url => {
+            try {
+              const response = await fetch(url);
+              if (response.ok) {
+                await cache.put(url, response);
+                console.log(`✅ Cached optional: ${url}`);
+              }
+            } catch (error) {
+              // Игнорируем ошибки для опциональных файлов
+            }
+          })
+        );
+        
+        return self.skipWaiting();
       })
-      .then(() => self.skipWaiting())
   );
 });
 
@@ -56,6 +101,11 @@ self.addEventListener('activate', event => {
 // Стратегия кэширования: Stale-While-Revalidate для статики
 self.addEventListener('fetch', event => {
   const url = new URL(event.request.url);
+  
+  // Игнорируем запросы не к нашему домену
+  if (url.origin !== self.location.origin) {
+    return;
+  }
   
   // API запросы - сначала сеть, если нет сети - кэш
   if (url.pathname.startsWith('/api/')) {
@@ -110,7 +160,7 @@ self.addEventListener('fetch', event => {
             return response;
           })
           .catch(() => {
-            // Если нет сети и нет кэша - показываем заглушку
+            // Если нет сети и нет кэша - показываем заглушку для HTML
             if (event.request.mode === 'navigate') {
               return caches.match('/');
             }
@@ -191,27 +241,3 @@ self.addEventListener('notificationclick', event => {
     })
   );
 });
-
-// Обработка синхронизации в фоне
-self.addEventListener('sync', event => {
-  console.log('Sync event:', event.tag);
-  
-  if (event.tag === 'sync-orders') {
-    event.waitUntil(syncOrders());
-  }
-  
-  if (event.tag === 'sync-reviews') {
-    event.waitUntil(syncReviews());
-  }
-});
-
-// Функции для фоновой синхронизации
-async function syncOrders() {
-  console.log('Syncing orders...');
-  // Здесь будет логика синхронизации заказов
-}
-
-async function syncReviews() {
-  console.log('Syncing reviews...');
-  // Здесь будет логика синхронизации отзывов
-}

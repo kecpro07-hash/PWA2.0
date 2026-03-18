@@ -30,9 +30,10 @@ function validatePhone(phone) {
     return cleaned.length >= 10 && cleaned.length <= 11;
 }
 
-// Валидация email
+// Валидация email - строка 147 где-то здесь
 function validateEmail(email) {
-    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    // !!! ВАЖНО: слэши должны быть в начале и в конце !!!
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;  // ← проверьте эту строку
     return re.test(email);
 }
 
@@ -144,4 +145,17 @@ function isTouchDevice() {
 // Определение платформы
 function getPlatform() {
     const ua = navigator.userAgent;
-    if (ua.match(/
+    if (ua.match(/android/i)) return 'android';
+    if (ua.match(/iphone|ipad|ipod/i)) return 'ios';
+    if (ua.match(/windows/i)) return 'windows';
+    if (ua.match(/mac/i)) return 'mac';
+    return 'other';
+}
+
+// Показ уведомления (если функция не определена в app.js)
+if (typeof showToast !== 'function') {
+    window.showToast = function(message, type = 'info', duration = 3000) {
+        console.log(`[${type}] ${message}`);
+        alert(message); // временно, пока не появится нормальный showToast
+    };
+}

@@ -536,66 +536,83 @@ async function register() {
 
 
 // WebSocket клиент
+// WebSocket клиент
 let socket = null;
+let socketReconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 function connectWebSocket() {
-    if (socket) return;
+    // Не подключаемся, если уже есть соединение или слишком много попыток
+    if (socket || socketReconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        return;
+    }
     
+    // Определяем протокол (wss для HTTPS, ws для HTTP)
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}`;
+    const wsUrl = `${protocol}//${window.location.host}/socket.io/`;
     
-    socket = new WebSocket(wsUrl);
+    console.log('🔄 Подключение к WebSocket:', wsUrl);
     
-    socket.onopen = () => {
-        console.log('WebSocket connected');
+    try {
+        socket = new WebSocket(wsUrl);
         
-        // Если админ - подключаемся к админской комнате
-        if (currentUser?.user_id === ADMIN_ID) {
-            socket.send(JSON.stringify({
-                type: 'join_admin'
-            }));
-        }
-    };
-    
-    socket.onmessage = (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            handleWebSocketMessage(data);
-        } catch (e) {
-            console.error('WebSocket message error:', e);
-        }
-    };
-    
-    socket.onclose = () => {
-        console.log('WebSocket disconnected');
-        socket = null;
-        
-        // Пытаемся переподключиться через 5 секунд
-        setTimeout(connectWebSocket, 5000);
-    };
-}
-
-function handleWebSocketMessage(data) {
-    switch (data.type) {
-        case 'new_order':
-            showToast('Новый заказ!', 'info');
-            if (currentPage === 'admin') {
-                loadAdminPage();
-            }
-            break;
+        socket.onopen = () => {
+            console.log('✅ WebSocket connected');
+            socketReconnectAttempts = 0; // Сбрасываем счетчик при успехе
             
-        case 'order_status_changed':
-            showToast(`Статус заказа ${data.number} изменен`, 'info');
-            if (currentPage === 'orders') {
-                loadOrdersPage();
+            // Отправляем приветственное сообщение
+            socket.send(JSON.stringify({
+                type: 'join',
+                user_id: currentUser?.user_id,
+                timestamp: Date.now()
+            }));
+            
+            // Если админ - подключаемся к админской комнате
+            if (currentUser?.user_id === ADMIN_ID) {
+                socket.send(JSON.stringify({
+                    type: 'join_admin'
+                }));
             }
-            break;
+        };
+        
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('📩 WebSocket message:', data);
+                handleWebSocketMessage(data);
+            } catch (e) {
+                console.error('WebSocket message error:', e);
+            }
+        };
+        
+        socket.onerror = (error) => {
+            console.log('⚠️ WebSocket error (нормально для бесплатного тарифа)');
+            // Не показываем ошибку пользователю - это ожидаемо для Render free tier
+        };
+        
+        socket.onclose = (event) => {
+            console.log('🔌 WebSocket disconnected:', event.code, event.reason);
+            socket = null;
+            
+            // Пытаемся переподключиться с увеличивающейся задержкой
+            if (socketReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                socketReconnectAttempts++;
+                const delay = Math.min(1000 * Math.pow(2, socketReconnectAttempts), 30000);
+                console.log(`🔄 Reconnect attempt ${socketReconnectAttempts} in ${delay}ms`);
+                setTimeout(connectWebSocket, delay);
+            }
+        };
+        
+    } catch (error) {
+        console.log('❌ WebSocket creation failed:', error);
+        socket = null;
     }
 }
 
-// Подключаем WebSocket после авторизации
+// Упрощенная версия для постоянного подключения (мягко)
 setInterval(() => {
-    if (currentUser && !socket) {
+    // Пытаемся подключиться только если есть пользователь и нет соединения
+    if (currentUser && !socket && socketReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         connectWebSocket();
     }
-}, 1000);
+}, 10000); // Проверяем каждые 10 секунд, а не каждую секунду

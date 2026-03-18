@@ -1,18 +1,18 @@
 import os
 import logging
-from datetime import timedelta
+import secrets
+from datetime import datetime, timedelta
+from functools import wraps
+
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
-from flask_socketio import SocketIO, emit, join_room, leave_room
-from database import init_db, get_db_connection
-from models import User, Order, Review, Bonus
-from auth import auth_bp
-from payments import payments_bp
-from admin import admin_bp
-from bonuses import bonuses_bp
-import redis
-from celery import Celery
+from flask_jwt_extended import (
+    JWTManager, create_access_token, create_refresh_token,
+    jwt_required, get_jwt_identity, get_jwt
+)
+from flask_socketio import SocketIO, emit
+import psycopg2
+import psycopg2.extras
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -20,44 +20,177 @@ logger = logging.getLogger(__name__)
 
 # Инициализация Flask
 app = Flask(__name__, static_folder='../frontend', static_url_path='')
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key')
-app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'jwt-secret-key')
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=30)
-app.config['CORS_HEADERS'] = 'Content-Type'
 
-# CORS для всех доменов (в продакшене ограничьте)
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# Конфигурация
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', secrets.token_hex(32))
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=30)
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=90)
+
+# CORS
+CORS(app, resources={
+    r"/api/*": {
+        "origins": os.environ.get('CORS_ORIGINS', '*').split(',')
+    }
+})
 
 # JWT
 jwt = JWTManager(app)
 
 # WebSocket
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
-# Redis для кэша и сессий
-redis_client = redis.Redis(
-    host=os.environ.get('REDIS_HOST', 'localhost'),
-    port=int(os.environ.get('REDIS_PORT', 6379)),
-    password=os.environ.get('REDIS_PASSWORD', ''),
-    decode_responses=True
-)
+# ================== БАЗА ДАННЫХ ==================
 
-# Celery для фоновых задач
-celery = Celery(
-    app.name,
-    broker=os.environ.get('REDIS_URL', 'redis://localhost:6379/0'),
-    backend=os.environ.get('REDIS_URL', 'redis://localhost:6379/0')
-)
+def get_db():
+    """Получить соединение с БД"""
+    try:
+        conn = psycopg2.connect(os.environ.get('DATABASE_URL'))
+        return conn
+    except Exception as e:
+        logger.error(f"Ошибка подключения к БД: {e}")
+        return None
 
-# Регистрация blueprint'ов
-app.register_blueprint(auth_bp, url_prefix='/api/auth')
-app.register_blueprint(payments_bp, url_prefix='/api/payments')
-app.register_blueprint(admin_bp, url_prefix='/api/admin')
-app.register_blueprint(bonuses_bp, url_prefix='/api/bonuses')
+def init_db():
+    """Инициализация таблиц"""
+    conn = get_db()
+    if not conn:
+        return False
+    
+    try:
+        cur = conn.cursor()
+        
+        # Пользователи
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                name TEXT,
+                phone TEXT,
+                address TEXT,
+                username TEXT,
+                short_id TEXT UNIQUE,
+                password_hash TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Заказы
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                number TEXT PRIMARY KEY,
+                user_id TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+                name TEXT,
+                phone TEXT,
+                address TEXT,
+                username TEXT,
+                short_id TEXT,
+                exact_time TEXT,
+                bags INTEGER,
+                amount INTEGER,
+                final_amount INTEGER DEFAULT 0,
+                bonus_used INTEGER DEFAULT 0,
+                bonus_discount INTEGER DEFAULT 0,
+                status TEXT,
+                payment TEXT,
+                reviewed BOOLEAN DEFAULT FALSE,
+                courier_id TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+        
+        # Отзывы
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS reviews (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+                short_id TEXT,
+                order_number TEXT REFERENCES orders(number) ON DELETE CASCADE,
+                rating INTEGER,
+                text TEXT,
+                date TEXT,
+                timestamp BIGINT
+            )
+        """)
+        
+        # Бонусы
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bonuses (
+                user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                balance INTEGER DEFAULT 0,
+                total_earned INTEGER DEFAULT 0,
+                total_spent INTEGER DEFAULT 0,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # История бонусов
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bonus_history (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT REFERENCES users(user_id) ON DELETE CASCADE,
+                order_number TEXT REFERENCES orders(number) ON DELETE SET NULL,
+                amount INTEGER NOT NULL,
+                type TEXT CHECK (type IN ('earn', 'spend')),
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Забаненные
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS banned_ids (
+                id TEXT PRIMARY KEY
+            )
+        """)
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS banned_users (
+                user_id TEXT PRIMARY KEY
+            )
+        """)
+        
+        conn.commit()
+        logger.info("✅ База данных инициализирована")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
-# Инициализация БД при запуске
-with app.app_context():
-    init_db()
+# Инициализация при запуске
+init_db()
+
+# ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
+
+def generate_order_number():
+    """Генерация номера заказа"""
+    import random
+    import string
+    letters = ''.join(random.choices(string.ascii_uppercase, k=3))
+    numbers = ''.join(random.choices(string.digits, k=5))
+    return f"{letters}{numbers}"
+
+def generate_short_id():
+    """Генерация короткого ID"""
+    import random
+    import string
+    while True:
+        short_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+        conn = get_db()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("SELECT user_id FROM users WHERE short_id = %s", (short_id,))
+            if not cur.fetchone():
+                conn.close()
+                return short_id
+            conn.close()
+
+def calculate_price(bags):
+    """Расчет стоимости"""
+    return 100 + (bags - 1) * 25 if bags > 0 else 0
 
 # ================== API ЭНДПОИНТЫ ==================
 
@@ -69,7 +202,135 @@ def serve_index():
 @app.route('/api/health')
 def health():
     """Проверка здоровья"""
-    return jsonify({'status': 'ok', 'time': datetime.now().isoformat()})
+    return jsonify({
+        'status': 'ok',
+        'time': datetime.now().isoformat(),
+        'database': 'connected' if get_db() else 'error'
+    })
+
+# ================== АВТОРИЗАЦИЯ ==================
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """Регистрация пользователя"""
+    data = request.json
+    
+    if not data.get('name') or not data.get('phone'):
+        return jsonify({'error': 'Имя и телефон обязательны'}), 400
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        
+        # Проверка существующего пользователя
+        cur.execute("SELECT user_id FROM users WHERE phone = %s", (data['phone'],))
+        if cur.fetchone():
+            return jsonify({'error': 'Пользователь с таким телефоном уже существует'}), 400
+        
+        # Генерация ID
+        user_id = str(secrets.randbelow(1000000000))
+        short_id = generate_short_id()
+        
+        # Создание пользователя
+        cur.execute("""
+            INSERT INTO users (user_id, name, phone, address, username, short_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            RETURNING user_id
+        """, (user_id, data['name'], data['phone'], data.get('address', ''), 
+              data.get('username', ''), short_id))
+        
+        # Создание бонусного счета
+        cur.execute("""
+            INSERT INTO bonuses (user_id, balance, total_earned, total_spent)
+            VALUES (%s, 0, 0, 0)
+        """, (user_id,))
+        
+        conn.commit()
+        
+        # Создание токена
+        access_token = create_access_token(identity=user_id)
+        refresh_token = create_refresh_token(identity=user_id)
+        
+        return jsonify({
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'user': {
+                'user_id': user_id,
+                'name': data['name'],
+                'phone': data['phone'],
+                'short_id': short_id
+            }
+        })
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Ошибка регистрации: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Вход по телефону"""
+    data = request.json
+    
+    if not data.get('phone'):
+        return jsonify({'error': 'Телефон обязателен'}), 400
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT user_id, name, phone, address, username, short_id
+            FROM users WHERE phone = %s
+        """, (data['phone'],))
+        
+        user = cur.fetchone()
+        
+        if not user:
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        
+        # Проверка бана
+        cur.execute("SELECT user_id FROM banned_users WHERE user_id = %s", (user[0],))
+        if cur.fetchone():
+            return jsonify({'error': 'Пользователь заблокирован'}), 403
+        
+        access_token = create_access_token(identity=user[0])
+        refresh_token = create_refresh_token(identity=user[0])
+        
+        return jsonify({
+            'access_token': access_token,
+            'refresh_token': refresh_token,
+            'user': {
+                'user_id': user[0],
+                'name': user[1],
+                'phone': user[2],
+                'address': user[3],
+                'username': user[4],
+                'short_id': user[5]
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Ошибка входа: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/auth/refresh', methods=['POST'])
+@jwt_required(refresh=True)
+def refresh():
+    """Обновление токена"""
+    user_id = get_jwt_identity()
+    access_token = create_access_token(identity=user_id)
+    return jsonify({'access_token': access_token})
 
 # ================== ПОЛЬЗОВАТЕЛИ ==================
 
@@ -78,22 +339,25 @@ def health():
 def get_current_user():
     """Получить данные текущего пользователя"""
     user_id = get_jwt_identity()
-    conn = get_db_connection()
+    
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
+        
         cur.execute("""
             SELECT user_id, name, phone, address, username, short_id, created_at
             FROM users WHERE user_id = %s
         """, (user_id,))
+        
         user = cur.fetchone()
         
         if not user:
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({'error': 'Пользователь не найден'}), 404
         
-        # Получаем бонусы
+        # Бонусы
         cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
         bonus = cur.fetchone()
         
@@ -107,8 +371,9 @@ def get_current_user():
             'created_at': user[6].isoformat() if user[6] else None,
             'bonus_balance': bonus[0] if bonus else 0
         })
+        
     except Exception as e:
-        logger.error(f"Error getting user: {e}")
+        logger.error(f"Ошибка получения пользователя: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -120,20 +385,39 @@ def update_user():
     user_id = get_jwt_identity()
     data = request.json
     
-    conn = get_db_connection()
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
-        cur.execute("""
+        
+        updates = []
+        values = []
+        
+        if 'name' in data:
+            updates.append("name = %s")
+            values.append(data['name'])
+        
+        if 'phone' in data:
+            updates.append("phone = %s")
+            values.append(data['phone'])
+        
+        if 'address' in data:
+            updates.append("address = %s")
+            values.append(data['address'])
+        
+        if not updates:
+            return jsonify({'error': 'Нет данных для обновления'}), 400
+        
+        values.append(user_id)
+        
+        cur.execute(f"""
             UPDATE users 
-            SET name = COALESCE(%s, name),
-                phone = COALESCE(%s, phone),
-                address = COALESCE(%s, address)
+            SET {', '.join(updates)}
             WHERE user_id = %s
             RETURNING user_id, name, phone, address, short_id
-        """, (data.get('name'), data.get('phone'), data.get('address'), user_id))
+        """, values)
         
         updated = cur.fetchone()
         conn.commit()
@@ -145,9 +429,10 @@ def update_user():
             'address': updated[3],
             'short_id': updated[4]
         })
+        
     except Exception as e:
         conn.rollback()
-        logger.error(f"Error updating user: {e}")
+        logger.error(f"Ошибка обновления пользователя: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -160,9 +445,9 @@ def get_orders():
     """Получить заказы пользователя"""
     user_id = get_jwt_identity()
     
-    conn = get_db_connection()
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
@@ -193,8 +478,9 @@ def get_orders():
             })
         
         return jsonify(orders)
+        
     except Exception as e:
-        logger.error(f"Error getting orders: {e}")
+        logger.error(f"Ошибка получения заказов: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -202,37 +488,39 @@ def get_orders():
 @app.route('/api/orders/create', methods=['POST'])
 @jwt_required()
 def create_order():
-    """Создать новый заказ"""
+    """Создать заказ"""
     user_id = get_jwt_identity()
     data = request.json
     
     required = ['bags', 'exact_time', 'address']
     if not all(k in data for k in required):
-        return jsonify({'error': 'Missing required fields'}), 400
+        return jsonify({'error': 'Не все поля заполнены'}), 400
     
-    conn = get_db_connection()
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
         
         # Получаем данные пользователя
-        cur.execute("SELECT name, phone, username, short_id FROM users WHERE user_id = %s", (user_id,))
+        cur.execute("""
+            SELECT name, phone, username, short_id 
+            FROM users WHERE user_id = %s
+        """, (user_id,))
+        
         user = cur.fetchone()
         if not user:
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({'error': 'Пользователь не найден'}), 404
         
         name, phone, username, short_id = user
         
-        # Генерируем номер заказа
-        import random, string
-        order_number = ''.join(random.choices(string.ascii_uppercase, k=3)) + \
-                      ''.join(random.choices(string.digits, k=5))
+        # Генерация номера заказа
+        order_number = generate_order_number()
         
-        # Рассчитываем сумму
+        # Расчет стоимости
         bags = int(data['bags'])
-        amount = 100 + (bags - 1) * 25 if bags > 0 else 0
+        amount = calculate_price(bags)
         
         # Обработка бонусов
         bonus_used = int(data.get('bonus_used', 0))
@@ -246,20 +534,29 @@ def create_order():
             current_bonus = bonus_row[0] if bonus_row else 0
             
             if current_bonus >= bonus_used:
-                # Рассчитываем скидку
-                BONUS_TO_RUB = 1
-                MAX_BONUS_PERCENT = 50
-                
-                discount_rub = bonus_used // BONUS_TO_RUB
-                max_discount = amount * MAX_BONUS_PERCENT // 100
+                # Расчет скидки
+                discount_rub = bonus_used
+                max_discount = amount * 50 // 100
                 bonus_discount = min(discount_rub, max_discount)
                 final_amount = amount - bonus_discount
                 
-                # Списание бонусов будет после подтверждения заказа
+                # Списание бонусов
+                cur.execute("""
+                    UPDATE bonuses 
+                    SET balance = balance - %s,
+                        total_spent = total_spent + %s,
+                        last_updated = CURRENT_TIMESTAMP
+                    WHERE user_id = %s
+                """, (bonus_used, bonus_used, user_id))
+                
+                cur.execute("""
+                    INSERT INTO bonus_history (user_id, order_number, amount, type, description)
+                    VALUES (%s, %s, %s, 'spend', %s)
+                """, (user_id, order_number, bonus_used, f"Списание за заказ {order_number}"))
             else:
                 bonus_used = 0
         
-        # Создаем заказ
+        # Создание заказа
         cur.execute("""
             INSERT INTO orders (
                 number, user_id, name, phone, address, username, short_id,
@@ -275,13 +572,18 @@ def create_order():
         
         conn.commit()
         
-        # Отправляем уведомление админу через WebSocket
-        socketio.emit('new_order', {
-            'number': order_number,
-            'user_name': name,
-            'amount': amount,
-            'final_amount': final_amount
-        }, room='admin')
+        # Отправка уведомления в Telegram (если есть токен)
+        if os.environ.get('BOT_TOKEN'):
+            try:
+                import requests
+                admin_id = os.environ.get('ADMIN_ID')
+                bot_token = os.environ.get('BOT_TOKEN')
+                
+                text = f"📦 НОВЫЙ ЗАКАЗ\nНомер: {order_number}\nАдрес: {data['address']}\nВремя: {data['exact_time']}\nСумма: {final_amount}₽"
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                requests.post(url, json={'chat_id': admin_id, 'text': text})
+            except:
+                pass
         
         return jsonify({
             'number': order_number,
@@ -294,7 +596,7 @@ def create_order():
         
     except Exception as e:
         conn.rollback()
-        logger.error(f"Error creating order: {e}")
+        logger.error(f"Ошибка создания заказа: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -303,21 +605,21 @@ def create_order():
 
 @app.route('/api/reviews', methods=['GET'])
 def get_reviews():
-    """Получить отзывы (публичный эндпоинт)"""
-    limit = request.args.get('limit', 50, type=int)
-    
-    conn = get_db_connection()
+    """Получить все отзывы (публично)"""
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
+        
+        # Последние 50 отзывов
         cur.execute("""
-            SELECT r.order_number, r.rating, r.text, r.date, r.short_id
-            FROM reviews r
-            ORDER BY r.timestamp DESC
-            LIMIT %s
-        """, (limit,))
+            SELECT order_number, rating, text, date, short_id
+            FROM reviews
+            ORDER BY timestamp DESC
+            LIMIT 50
+        """)
         
         reviews = []
         for row in cur.fetchall():
@@ -337,6 +639,7 @@ def get_reviews():
                 SUM(CASE WHEN rating = 5 THEN 1 ELSE 0 END) as five_stars
             FROM reviews
         """)
+        
         stats = cur.fetchone()
         
         return jsonify({
@@ -348,8 +651,9 @@ def get_reviews():
             },
             'last_updated': datetime.now().strftime('%d.%m.%Y %H:%M')
         })
+        
     except Exception as e:
-        logger.error(f"Error getting reviews: {e}")
+        logger.error(f"Ошибка получения отзывов: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -361,23 +665,32 @@ def add_review():
     user_id = get_jwt_identity()
     data = request.json
     
-    if 'order_number' not in data or 'rating' not in data:
-        return jsonify({'error': 'Missing required fields'}), 400
+    if not data.get('order_number') or not data.get('rating'):
+        return jsonify({'error': 'Не все поля заполнены'}), 400
     
-    conn = get_db_connection()
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
         
-        # Получаем short_id пользователя
+        # Получаем short_id
         cur.execute("SELECT short_id FROM users WHERE user_id = %s", (user_id,))
         user = cur.fetchone()
         if not user:
-            return jsonify({'error': 'User not found'}), 404
+            return jsonify({'error': 'Пользователь не найден'}), 404
         
         short_id = user[0]
+        
+        # Проверяем, что заказ принадлежит пользователю
+        cur.execute("""
+            SELECT number FROM orders 
+            WHERE number = %s AND user_id = %s
+        """, (data['order_number'], user_id))
+        
+        if not cur.fetchone() and data['order_number'] != "GENERAL":
+            return jsonify({'error': 'Заказ не найден'}), 404
         
         # Добавляем отзыв
         cur.execute("""
@@ -386,28 +699,25 @@ def add_review():
             RETURNING id
         """, (
             user_id, short_id, data['order_number'], data['rating'],
-            data.get('text', ''), 
+            data.get('text', ''),
             datetime.now().strftime('%d.%m.%Y %H:%M'),
-            datetime.now().timestamp()
+            int(datetime.now().timestamp())
         ))
         
         # Отмечаем заказ как с отзывом
-        cur.execute("""
-            UPDATE orders SET reviewed = TRUE 
-            WHERE number = %s AND user_id = %s
-        """, (data['order_number'], user_id))
+        if data['order_number'] != "GENERAL":
+            cur.execute("""
+                UPDATE orders SET reviewed = TRUE 
+                WHERE number = %s
+            """, (data['order_number'],))
         
         conn.commit()
-        
-        # Обновляем JSON для GitHub (асинхронно)
-        from tasks import update_github_reviews
-        update_github_reviews.delay()
         
         return jsonify({'success': True, 'id': cur.fetchone()[0]})
         
     except Exception as e:
         conn.rollback()
-        logger.error(f"Error adding review: {e}")
+        logger.error(f"Ошибка добавления отзыва: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -420,24 +730,25 @@ def get_bonus_balance():
     """Получить баланс бонусов"""
     user_id = get_jwt_identity()
     
-    conn = get_db_connection()
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
+        
+        # Текущий баланс
         cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
-        
         balance = row[0] if row else 0
         
-        # История операций
+        # История
         cur.execute("""
             SELECT amount, type, description, created_at
             FROM bonus_history
             WHERE user_id = %s
             ORDER BY created_at DESC
-            LIMIT 10
+            LIMIT 20
         """, (user_id,))
         
         history = []
@@ -453,30 +764,41 @@ def get_bonus_balance():
             'balance': balance,
             'history': history
         })
+        
     except Exception as e:
-        logger.error(f"Error getting bonus balance: {e}")
+        logger.error(f"Ошибка получения бонусов: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
 
-# ================== АДМИНСКИЕ ЭНДПОИНТЫ ==================
+# ================== АДМИНКА ==================
+
+def admin_required(f):
+    """Декоратор для проверки прав админа"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user_id = get_jwt_identity()
+        admin_id = os.environ.get('ADMIN_ID')
+        
+        if str(user_id) != str(admin_id):
+            return jsonify({'error': 'Доступ запрещен'}), 403
+        
+        return f(*args, **kwargs)
+    return decorated_function
 
 @app.route('/api/admin/orders', methods=['GET'])
 @jwt_required()
+@admin_required
 def admin_get_orders():
-    """Получить все заказы (только для админа)"""
-    # Проверка прав админа
-    if not is_admin(get_jwt_identity()):
-        return jsonify({'error': 'Access denied'}), 403
-    
+    """Получить все заказы (админ)"""
     status = request.args.get('status')
     
-    conn = get_db_connection()
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         
         if status:
             cur.execute("""
@@ -492,93 +814,165 @@ def admin_get_orders():
             orders.append(dict(row))
         
         return jsonify(orders)
+        
     except Exception as e:
-        logger.error(f"Error getting admin orders: {e}")
+        logger.error(f"Ошибка получения заказов: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
 
-@app.route('/api/admin/order/<order_number>/update', methods=['PUT'])
+@app.route('/api/admin/order/<order_number>/status', methods=['PUT'])
 @jwt_required()
-def admin_update_order(order_number):
-    """Обновить статус заказа (только для админа)"""
-    if not is_admin(get_jwt_identity()):
-        return jsonify({'error': 'Access denied'}), 403
-    
+@admin_required
+def admin_update_order_status(order_number):
+    """Обновить статус заказа"""
     data = request.json
     status = data.get('status')
-    payment = data.get('payment')
     
-    conn = get_db_connection()
+    if not status:
+        return jsonify({'error': 'Статус не указан'}), 400
+    
+    conn = get_db()
     if not conn:
-        return jsonify({'error': 'Database connection failed'}), 500
+        return jsonify({'error': 'Ошибка базы данных'}), 500
     
     try:
         cur = conn.cursor()
         
-        if status:
-            cur.execute("""
-                UPDATE orders SET status = %s 
-                WHERE number = %s
-                RETURNING number, status, user_id
-            """, (status, order_number))
-            
-            updated = cur.fetchone()
-            if updated and status == 'выполнен':
-                # Начисляем бонусы
-                from tasks import add_order_bonus
-                add_order_bonus.delay(order_number)
-                
-                # Уведомление через WebSocket
-                socketio.emit('order_status_changed', {
-                    'number': order_number,
-                    'status': status
-                })
+        cur.execute("""
+            UPDATE orders 
+            SET status = %s 
+            WHERE number = %s
+            RETURNING number, user_id, amount
+        """, (status, order_number))
         
-        if payment:
-            cur.execute("""
-                UPDATE orders SET payment = %s 
-                WHERE number = %s
-            """, (payment, order_number))
+        updated = cur.fetchone()
+        
+        if updated and status == 'выполнен':
+            # Начисляем бонусы (10% от суммы)
+            order_number, user_id, amount = updated
+            bonus_amount = amount * 10 // 100
+            
+            if bonus_amount > 0:
+                cur.execute("""
+                    INSERT INTO bonuses (user_id, balance, total_earned)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (user_id) DO UPDATE
+                    SET balance = bonuses.balance + %s,
+                        total_earned = bonuses.total_earned + %s,
+                        last_updated = CURRENT_TIMESTAMP
+                """, (user_id, bonus_amount, bonus_amount, bonus_amount, bonus_amount))
+                
+                cur.execute("""
+                    INSERT INTO bonus_history (user_id, order_number, amount, type, description)
+                    VALUES (%s, %s, %s, 'earn', %s)
+                """, (user_id, order_number, bonus_amount, f"Начисление за заказ {order_number}"))
         
         conn.commit()
         
         return jsonify({'success': True})
+        
     except Exception as e:
         conn.rollback()
-        logger.error(f"Error updating order: {e}")
+        logger.error(f"Ошибка обновления заказа: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
 
-# ================== WEBSOCKET ==================
+@app.route('/api/admin/users', methods=['GET'])
+@jwt_required()
+@admin_required
+def admin_get_users():
+    """Получить всех пользователей"""
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("""
+            SELECT u.*, COALESCE(b.balance, 0) as bonus_balance
+            FROM users u
+            LEFT JOIN bonuses b ON u.user_id = b.user_id
+            ORDER BY u.created_at DESC
+        """)
+        
+        users = []
+        for row in cur.fetchall():
+            users.append(dict(row))
+        
+        return jsonify(users)
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения пользователей: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
-@socketio.on('connect')
-def handle_connect():
-    """Обработка подключения к WebSocket"""
-    logger.info(f"Client connected: {request.sid}")
+@app.route('/api/admin/bonus/add', methods=['POST'])
+@jwt_required()
+@admin_required
+def admin_add_bonus():
+    """Добавить бонусы пользователю"""
+    data = request.json
+    
+    if not data.get('user_id') or not data.get('amount'):
+        return jsonify({'error': 'Не все поля заполнены'}), 400
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        
+        amount = int(data['amount'])
+        
+        cur.execute("""
+            INSERT INTO bonuses (user_id, balance, total_earned)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE
+            SET balance = bonuses.balance + %s,
+                total_earned = bonuses.total_earned + %s,
+                last_updated = CURRENT_TIMESTAMP
+            RETURNING balance
+        """, (data['user_id'], amount, amount, amount, amount))
+        
+        new_balance = cur.fetchone()[0]
+        
+        cur.execute("""
+            INSERT INTO bonus_history (user_id, amount, type, description)
+            VALUES (%s, %s, 'earn', %s)
+        """, (data['user_id'], amount, f"Ручное начисление администратором"))
+        
+        conn.commit()
+        
+        return jsonify({
+            'success': True,
+            'new_balance': new_balance
+        })
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Ошибка начисления бонусов: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
-@socketio.on('join_admin')
-def handle_join_admin():
-    """Админ подключается к админской комнате"""
-    # Проверка токена (можно через query params)
-    join_room('admin')
-    emit('joined_admin', {'status': 'ok'})
+# ================== WEBHOOK ДЛЯ TELEGRAM ==================
 
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Обработка отключения"""
-    logger.info(f"Client disconnected: {request.sid}")
+@app.route('/api/telegram/webhook', methods=['POST'])
+def telegram_webhook():
+    """Принимает обновления от Telegram бота"""
+    update = request.json
+    
+    # Здесь можно обрабатывать сообщения от бота
+    # Например, синхронизировать пользователей
+    
+    return jsonify({'ok': True})
 
 # ================== ЗАПУСК ==================
 
-def is_admin(user_id):
-    """Проверка, является ли пользователь админом"""
-    admin_id = os.environ.get('ADMIN_ID')
-    return str(user_id) == str(admin_id)
-
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    
-    socketio.run(app, host='0.0.0.0', port=port, debug=debug)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)

@@ -533,69 +533,7 @@ async function register() {
     }
 }
 
-// API клиент
-const api = {
-    baseUrl: API_URL,
-    
-    async request(endpoint, options = {}) {
-        const url = this.baseUrl + endpoint;
-        const token = localStorage.getItem('token');
-        
-        const headers = {
-            'Content-Type': 'application/json',
-            ...options.headers
-        };
-        
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`;
-        }
-        
-        try {
-            const response = await fetch(url, {
-                ...options,
-                headers
-            });
-            
-            const data = await response.json();
-            
-            return {
-                ok: response.ok,
-                status: response.status,
-                data
-            };
-        } catch (error) {
-            console.error('API Error:', error);
-            return {
-                ok: false,
-                error: error.message
-            };
-        }
-    },
-    
-    get(endpoint) {
-        return this.request(endpoint);
-    },
-    
-    post(endpoint, body) {
-        return this.request(endpoint, {
-            method: 'POST',
-            body: JSON.stringify(body)
-        });
-    },
-    
-    put(endpoint, body) {
-        return this.request(endpoint, {
-            method: 'PUT',
-            body: JSON.stringify(body)
-        });
-    },
-    
-    delete(endpoint) {
-        return this.request(endpoint, {
-            method: 'DELETE'
-        });
-    }
-};
+
 
 // WebSocket клиент
 let socket = null;

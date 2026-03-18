@@ -1,0 +1,16 @@
+Flask==2.3.3
+Flask-CORS==4.0.0
+Flask-JWT-Extended==4.5.2
+Flask-SocketIO==5.3.4
+psycopg2-binary==2.9.9
+gunicorn==21.2.0
+gevent==23.9.1
+python-telegram-bot==20.7
+requests==2.31.0
+python-dotenv==1.0.0
+redis==5.0.1
+celery==5.3.4
+qrcode==7.4.2
+Pillow==10.1.0
+stripe==7.5.0
+python-dateutil==2.8.2

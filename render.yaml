@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: unch-pwa
+    runtime: python
+    region: frankfurt  # или singapore, ohio
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn backend.app:app --workers 4 --worker-class gevent --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: unch-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: ADMIN_ID
+        sync: false  # Заполните вручную в панели Render
+      - key: BOT_TOKEN
+        sync: false  # Заполните вручную
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_REPO
+        value: "kecpro07-hash/Reviews1.0.0"
+      - key: FLASK_ENV
+        value: production
+      - key: CORS_ORIGINS
+        value: "https://unch-pwa.onrender.com"
+
+databases:
+  - name: unch-db
+    databaseName: unch
+    user: unch_user
+    plan: free
+    region: frankfurt
+    ipAllowList: []  # Разрешить все IP

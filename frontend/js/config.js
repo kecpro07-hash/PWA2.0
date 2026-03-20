@@ -5,10 +5,10 @@ const CONFIG = {
     APP_VERSION: '1.0.0',
     
     // Telegram ID администратора (вставьте свой)
-    ADMIN_ID: '1209283843',  // ← ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+    ADMIN_ID: '764221355',  // ← ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
     
     // Telegram бот для входа (если есть)
-    TELEGRAM_BOT_USERNAME: 'ВашБотЮзернейм',  // Опционально
+    TELEGRAM_BOT_USERNAME: '@UNCH_ORIGINAL_BOT',  // Опционально
     
     // Настройки бонусов
     BONUS_PERCENT: 10,

@@ -1,9 +1,14 @@
 // Конфигурация приложения
 const CONFIG = {
     API_URL: window.location.origin,
-    ADMIN_ID: 'ваш_telegram_id', // Замените на свой Telegram ID
     APP_NAME: 'У Нас Чисто',
     APP_VERSION: '1.0.0',
+    
+    // Telegram ID администратора (вставьте свой)
+    ADMIN_ID: '1209283843',  // ← ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+    
+    // Telegram бот для входа (если есть)
+    TELEGRAM_BOT_USERNAME: 'ВашБотЮзернейм',  // Опционально
     
     // Настройки бонусов
     BONUS_PERCENT: 10,
@@ -15,7 +20,12 @@ const CONFIG = {
     TIME_INTERVAL: 10,
     
     // Платежи
-    SBP_PHONE: '8 (906 )801-67-38',
+    SBP_PHONE: '8(906)801 67 38',
     SBP_BANK: 'СберБанк',
     SBP_NAME: 'Картавенко В. В.'
 };
+
+// Экспортируем
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = CONFIG;
+}

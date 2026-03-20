@@ -10,36 +10,30 @@ const USER_KEY = 'user_data';
 
 // ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
-// Показ уведомления (временно, пока нет глобального)
+// Показ уведомления (если нет глобальной)
 function showToastMessage(message, type = 'info') {
-    console.log(`[${type}] ${message}`);
-    // Если есть глобальная showToast - используем её
     if (typeof window.showToast === 'function') {
         window.showToast(message, type);
     } else {
+        console.log(`[${type}] ${message}`);
         alert(message);
     }
 }
 
-// Показ подтверждения
-function showConfirmMessage(message) {
-    return new Promise((resolve) => {
-        // Если есть глобальная showConfirm - используем её
-        if (typeof window.showConfirm === 'function') {
-            resolve(window.showConfirm(message));
-        } else {
-            resolve(confirm(message));
-        }
-    });
+// Показ подтверждения (если нет глобальной)
+async function showConfirmMessage(message) {
+    if (typeof window.showConfirm === 'function') {
+        return await window.showConfirm(message);
+    } else {
+        return confirm(message);
+    }
 }
 
 // ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
-// Проверка авторизации при загрузке
 async function initAuth() {
     console.log('🔐 Инициализация авторизации...');
     
-    // Проверяем сохраненный токен
     const savedToken = localStorage.getItem(TOKEN_KEY);
     const savedUser = localStorage.getItem(USER_KEY);
     
@@ -47,7 +41,6 @@ async function initAuth() {
         authToken = savedToken;
         currentUser = JSON.parse(savedUser);
         
-        // Проверяем валидность токена на сервере
         try {
             const response = await api.get('/api/user/me');
             if (response.ok) {
@@ -73,7 +66,6 @@ async function initAuth() {
 
 // ==================== ВХОД ====================
 
-// Вход по телефону
 async function login(phone) {
     if (!phone || phone.length < 10) {
         showToastMessage('Введите корректный телефон', 'error');
@@ -86,16 +78,13 @@ async function login(phone) {
         if (response.ok) {
             const { access_token, user } = response.data;
             
-            // Сохраняем данные
             authToken = access_token;
             currentUser = user;
             
             localStorage.setItem(TOKEN_KEY, access_token);
             localStorage.setItem(USER_KEY, JSON.stringify(user));
             
-            // Обновляем интерфейс
             updateUserInterface();
-            
             showToastMessage(`Добро пожаловать, ${user.name}!`, 'success');
             console.log('✅ Вход выполнен успешно');
             
@@ -111,7 +100,6 @@ async function login(phone) {
     }
 }
 
-// Вход через Telegram
 async function loginWithTelegram(tgData) {
     try {
         const response = await api.post('/api/auth/telegram', tgData);
@@ -142,11 +130,9 @@ async function loginWithTelegram(tgData) {
 
 // ==================== РЕГИСТРАЦИЯ ====================
 
-// Регистрация нового пользователя
 async function register(userData) {
     const { name, phone, address } = userData;
     
-    // Валидация
     if (!name || name.length < 2) {
         showToastMessage('Введите имя (минимум 2 символа)', 'error');
         return false;
@@ -190,42 +176,30 @@ async function register(userData) {
 
 // ==================== ВЫХОД ====================
 
-// Выход из системы
 async function logout() {
     const confirmed = await showConfirmMessage('Вы уверены, что хотите выйти?');
     
     if (confirmed) {
-        // Очищаем локальные данные
         authToken = null;
         currentUser = null;
         
         localStorage.removeItem(TOKEN_KEY);
         localStorage.removeItem(USER_KEY);
         
-        // Очищаем API кэш
         if (window.api && api.clearCache) {
             api.clearCache();
         }
         
-        // Обновляем интерфейс
         updateUserInterface();
         
-        // Показываем форму входа
-        if (typeof showAuthModal === 'function') {
-            showAuthModal();
-        }
-        
+        showAuthModal();
         showToastMessage('Вы вышли из системы', 'info');
         console.log('👋 Выход выполнен');
-        
-        // Перезагружаем страницу для очистки состояния
-        window.location.reload();
     }
 }
 
 // ==================== ОБНОВЛЕНИЕ ПРОФИЛЯ ====================
 
-// Обновление данных пользователя
 async function updateProfile(field, value) {
     if (!currentUser) return false;
     
@@ -254,11 +228,9 @@ async function updateProfile(field, value) {
 
 // ==================== ИНТЕРФЕЙС ====================
 
-// Обновление интерфейса после авторизации
 function updateUserInterface() {
     const isLoggedIn = currentUser !== null;
     
-    // Показываем/скрываем элементы для авторизованных пользователей
     document.querySelectorAll('.auth-required').forEach(el => {
         if (el) el.style.display = isLoggedIn ? 'block' : 'none';
     });
@@ -267,7 +239,6 @@ function updateUserInterface() {
         if (el) el.style.display = isLoggedIn ? 'none' : 'block';
     });
     
-    // Обновляем информацию о пользователе
     if (isLoggedIn && currentUser) {
         const userNameEl = document.getElementById('userName');
         const userIdEl = document.getElementById('userId');
@@ -277,7 +248,6 @@ function updateUserInterface() {
         if (userIdEl) userIdEl.textContent = `ID: ${currentUser.short_id || '---'}`;
         if (bonusBadge) bonusBadge.textContent = `${currentUser.bonus_balance || 0}💎`;
         
-        // Показываем админ-панель для администратора
         const adminId = window.CONFIG?.ADMIN_ID || '1209283843';
         if (currentUser.user_id === adminId) {
             document.querySelectorAll('.admin-only').forEach(el => {
@@ -287,24 +257,184 @@ function updateUserInterface() {
     }
 }
 
+// ==================== МОДАЛЬНЫЕ ОКНА ====================
+
+function showAuthModal() {
+    const existingModal = document.getElementById('authModal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.id = 'authModal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3 class="modal-title">Вход в систему</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Телефон</label>
+                    <input type="tel" class="form-input" id="loginPhone" placeholder="+7 (999) 123-45-67">
+                </div>
+                <button class="btn btn-primary" onclick="window.handleLogin()">Войти</button>
+                <button class="btn btn-secondary" onclick="window.showRegisterModal()">Зарегистрироваться</button>
+            </div>
+        </div>
+    `;
+    
+    let modalContainer = document.getElementById('modalContainer');
+    if (!modalContainer) {
+        modalContainer = document.createElement('div');
+        modalContainer.id = 'modalContainer';
+        document.body.appendChild(modalContainer);
+    }
+    modalContainer.appendChild(modal);
+    
+    modal.querySelector('.modal-close').addEventListener('click', () => {
+        modal.remove();
+    });
+    
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.remove();
+        }
+    });
+    
+    setTimeout(() => {
+        const phoneInput = modal.querySelector('#loginPhone');
+        if (phoneInput) phoneInput.focus();
+    }, 100);
+}
+
+function showRegisterModal() {
+    const authModal = document.getElementById('authModal');
+    if (authModal) authModal.remove();
+    
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.id = 'registerModal';
+    modal.innerHTML = `
+        <div class="modal-content" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3 class="modal-title">Регистрация</h3>
+                <button class="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label class="form-label">Имя *</label>
+                    <input type="text" class="form-input" id="regName" placeholder="Ваше имя">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Телефон *</label>
+                    <input type="tel" class="form-input" id="regPhone" placeholder="+7 (999) 123-45-67">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Адрес</label>
+                    <input type="text" class="form-input" id="regAddress" placeholder="Ваш адрес">
+                </div>
+                <button class="btn btn-primary" onclick="window.handleRegister()">Зарегистрироваться</button>
+                <button class="btn btn-secondary" onclick="window.showAuthModal()">Назад</button>
+            </div>
+        </div>
+    `;
+    
+    let modalContainer = document.getElementById('modalContainer');
+    if (!modalContainer) {
+        modalContainer = document.createElement('div');
+        modalContainer.id = 'modalContainer';
+        document.body.appendChild(modalContainer);
+    }
+    modalContainer.appendChild(modal);
+    
+    modal.querySelector('.modal-close').addEventListener('click', () => {
+        modal.remove();
+    });
+    
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.remove();
+        }
+    });
+    
+    setTimeout(() => {
+        const nameInput = modal.querySelector('#regName');
+        if (nameInput) nameInput.focus();
+    }, 100);
+}
+
+// ==================== ОБРАБОТЧИКИ ====================
+
+async function handleLogin() {
+    const phoneInput = document.getElementById('loginPhone');
+    if (!phoneInput) return;
+    
+    const phone = phoneInput.value;
+    
+    if (!phone || phone.length < 10) {
+        showToastMessage('Введите корректный телефон', 'error');
+        return;
+    }
+    
+    const success = await login(phone);
+    
+    if (success) {
+        const modal = document.getElementById('authModal');
+        if (modal) modal.remove();
+        
+        if (typeof window.loadPage === 'function') {
+            window.loadPage('main');
+        } else {
+            window.location.reload();
+        }
+    }
+}
+
+async function handleRegister() {
+    const name = document.getElementById('regName')?.value;
+    const phone = document.getElementById('regPhone')?.value;
+    const address = document.getElementById('regAddress')?.value;
+    
+    if (!name || name.length < 2) {
+        showToastMessage('Введите имя (минимум 2 символа)', 'error');
+        return;
+    }
+    
+    if (!phone || phone.length < 10) {
+        showToastMessage('Введите корректный телефон', 'error');
+        return;
+    }
+    
+    const success = await register({ name, phone, address });
+    
+    if (success) {
+        const modal = document.getElementById('registerModal');
+        if (modal) modal.remove();
+        
+        if (typeof window.loadPage === 'function') {
+            window.loadPage('main');
+        } else {
+            window.location.reload();
+        }
+    }
+}
+
 // ==================== ГЕТТЕРЫ ====================
 
-// Получение текущего токена
 function getAuthToken() {
     return authToken || localStorage.getItem(TOKEN_KEY);
 }
 
-// Получение текущего пользователя
 function getCurrentUser() {
     return currentUser || JSON.parse(localStorage.getItem(USER_KEY) || 'null');
 }
 
-// Проверка, авторизован ли пользователь
 function isAuthenticated() {
     return !!getCurrentUser() && !!getAuthToken();
 }
 
-// Проверка, является ли пользователь админом
 function isAdmin() {
     const user = getCurrentUser();
     const adminId = window.CONFIG?.ADMIN_ID || '1209283843';
@@ -313,7 +443,6 @@ function isAdmin() {
 
 // ==================== ЭКСПОРТ ====================
 
-// Экспортируем функции в глобальный объект
 window.auth = {
     init: initAuth,
     login,
@@ -326,5 +455,10 @@ window.auth = {
     isAdmin,
     getToken: getAuthToken
 };
+
+window.showAuthModal = showAuthModal;
+window.showRegisterModal = showRegisterModal;
+window.handleLogin = handleLogin;
+window.handleRegister = handleRegister;
 
 console.log('🔐 Модуль авторизации загружен');

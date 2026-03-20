@@ -1,11 +1,16 @@
 // Расширенный API клиент с обработкой ошибок и кэшированием
 const api = {
-    baseUrl: CONFIG.API_URL,
+    baseUrl: window.location.origin,
     cache: new Map(),
+    
+    // Получение токена
+    getToken() {
+        return localStorage.getItem('auth_token');
+    },
     
     async request(endpoint, options = {}) {
         const url = this.baseUrl + endpoint;
-        const token = localStorage.getItem('token');
+        const token = this.getToken();
         
         const headers = {
             'Content-Type': 'application/json',
@@ -19,9 +24,12 @@ const api = {
         
         // Кэширование GET запросов
         const cacheKey = url + JSON.stringify(options);
-        if (options.method === 'GET' && this.cache.has(cacheKey)) {
+        const isGetRequest = options.method === 'GET' || !options.method;
+        
+        if (isGetRequest && this.cache.has(cacheKey)) {
             const cached = this.cache.get(cacheKey);
             if (Date.now() - cached.timestamp < 60000) { // 1 минута
+                console.log(`📦 Cache hit: ${endpoint}`);
                 return cached.data;
             }
             this.cache.delete(cacheKey);
@@ -50,8 +58,20 @@ const api = {
                 headers: response.headers
             };
             
+            // При 401 - очищаем токен
+            if (response.status === 401) {
+                console.log('🔒 401 Unauthorized - очищаем токен');
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('user_data');
+                
+                // Если есть функция для показа входа - вызываем
+                if (typeof window.showAuthModal === 'function') {
+                    window.showAuthModal();
+                }
+            }
+            
             // Кэшируем успешные GET запросы
-            if (response.ok && options.method === 'GET') {
+            if (response.ok && isGetRequest) {
                 this.cache.set(cacheKey, {
                     timestamp: Date.now(),
                     data: result
@@ -66,7 +86,7 @@ const api = {
             // Пытаемся получить из кэша при ошибке сети
             if (this.cache.has(cacheKey)) {
                 const cached = this.cache.get(cacheKey);
-                console.log('Returning cached data');
+                console.log('📦 Network error, returning cached data');
                 return cached.data;
             }
             
@@ -98,7 +118,7 @@ const api = {
     },
     
     post(endpoint, body) {
-        this.invalidateCache(endpoint); // Инвалидируем кэш при POST
+        this.invalidateCache(endpoint);
         return this.request(endpoint, {
             method: 'POST',
             body: JSON.stringify(body)
@@ -118,45 +138,10 @@ const api = {
         return this.request(endpoint, {
             method: 'DELETE'
         });
-    },
-    
-    // Загрузка файла
-    upload(endpoint, file, onProgress) {
-        return new Promise((resolve, reject) => {
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            const xhr = new XMLHttpRequest();
-            
-            xhr.upload.addEventListener('progress', (e) => {
-                if (e.lengthComputable && onProgress) {
-                    onProgress(Math.round((e.loaded * 100) / e.total));
-                }
-            });
-            
-            xhr.addEventListener('load', () => {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        resolve(JSON.parse(xhr.responseText));
-                    } catch {
-                        resolve(xhr.responseText);
-                    }
-                } else {
-                    reject(new Error(`Upload failed: ${xhr.status}`));
-                }
-            });
-            
-            xhr.addEventListener('error', () => reject(new Error('Upload failed')));
-            
-            xhr.open('POST', this.baseUrl + endpoint);
-            xhr.setRequestHeader('Authorization', `Bearer ${localStorage.getItem('token')}`);
-            xhr.send(formData);
-        });
     }
 };
 
-// ⭐ ВАЖНО: Делаем api доступным глобально
+// Делаем api глобальным
 window.api = api;
 
-// Для удобства можно также экспортировать, если используете модули
-// export default api;
+console.log('🌐 API клиент загружен');

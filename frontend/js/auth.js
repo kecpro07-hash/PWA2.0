@@ -8,6 +8,31 @@ let authToken = null;
 const TOKEN_KEY = 'auth_token';
 const USER_KEY = 'user_data';
 
+// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+// Показ уведомления (временно, пока нет глобального)
+function showToastMessage(message, type = 'info') {
+    console.log(`[${type}] ${message}`);
+    // Если есть глобальная showToast - используем её
+    if (typeof window.showToast === 'function') {
+        window.showToast(message, type);
+    } else {
+        alert(message);
+    }
+}
+
+// Показ подтверждения
+function showConfirmMessage(message) {
+    return new Promise((resolve) => {
+        // Если есть глобальная showConfirm - используем её
+        if (typeof window.showConfirm === 'function') {
+            resolve(window.showConfirm(message));
+        } else {
+            resolve(confirm(message));
+        }
+    });
+}
+
 // ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
 // Проверка авторизации при загрузке
@@ -29,14 +54,18 @@ async function initAuth() {
                 currentUser = response.data;
                 localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
                 console.log('✅ Авторизация восстановлена');
+                updateUserInterface();
                 return true;
+            } else if (response.status === 401) {
+                console.log('❌ Токен недействителен');
+                logout();
+                return false;
             }
         } catch (error) {
-            console.log('❌ Токен недействителен, требуется вход');
+            console.log('❌ Ошибка проверки токена:', error);
+            logout();
+            return false;
         }
-        
-        // Токен недействителен - очищаем
-        logout();
     }
     
     return false;
@@ -47,11 +76,9 @@ async function initAuth() {
 // Вход по телефону
 async function login(phone) {
     if (!phone || phone.length < 10) {
-        showToast('Введите корректный телефон', 'error');
+        showToastMessage('Введите корректный телефон', 'error');
         return false;
     }
-    
-    showLoading(true);
     
     try {
         const response = await api.post('/api/auth/login', { phone });
@@ -69,27 +96,23 @@ async function login(phone) {
             // Обновляем интерфейс
             updateUserInterface();
             
-            showToast(`Добро пожаловать, ${user.name}!`, 'success');
+            showToastMessage(`Добро пожаловать, ${user.name}!`, 'success');
             console.log('✅ Вход выполнен успешно');
             
             return true;
         } else {
-            showToast(response.data.error || 'Ошибка входа', 'error');
+            showToastMessage(response.data.error || 'Ошибка входа', 'error');
             return false;
         }
     } catch (error) {
         console.error('Login error:', error);
-        showToast('Ошибка сети', 'error');
+        showToastMessage('Ошибка сети', 'error');
         return false;
-    } finally {
-        showLoading(false);
     }
 }
 
 // Вход через Telegram
 async function loginWithTelegram(tgData) {
-    showLoading(true);
-    
     try {
         const response = await api.post('/api/auth/telegram', tgData);
         
@@ -103,19 +126,17 @@ async function loginWithTelegram(tgData) {
             localStorage.setItem(USER_KEY, JSON.stringify(user));
             
             updateUserInterface();
-            showToast(`Добро пожаловать, ${user.name}!`, 'success');
+            showToastMessage(`Добро пожаловать, ${user.name}!`, 'success');
             
             return true;
         } else {
-            showToast(response.data.error || 'Ошибка входа через Telegram', 'error');
+            showToastMessage(response.data.error || 'Ошибка входа через Telegram', 'error');
             return false;
         }
     } catch (error) {
         console.error('Telegram login error:', error);
-        showToast('Ошибка сети', 'error');
+        showToastMessage('Ошибка сети', 'error');
         return false;
-    } finally {
-        showLoading(false);
     }
 }
 
@@ -127,16 +148,14 @@ async function register(userData) {
     
     // Валидация
     if (!name || name.length < 2) {
-        showToast('Введите имя (минимум 2 символа)', 'error');
+        showToastMessage('Введите имя (минимум 2 символа)', 'error');
         return false;
     }
     
     if (!phone || phone.length < 10) {
-        showToast('Введите корректный телефон', 'error');
+        showToastMessage('Введите корректный телефон', 'error');
         return false;
     }
-    
-    showLoading(true);
     
     try {
         const response = await api.post('/api/auth/register', {
@@ -155,19 +174,17 @@ async function register(userData) {
             localStorage.setItem(USER_KEY, JSON.stringify(user));
             
             updateUserInterface();
-            showToast('Регистрация успешна!', 'success');
+            showToastMessage('Регистрация успешна!', 'success');
             
             return true;
         } else {
-            showToast(response.data.error || 'Ошибка регистрации', 'error');
+            showToastMessage(response.data.error || 'Ошибка регистрации', 'error');
             return false;
         }
     } catch (error) {
         console.error('Register error:', error);
-        showToast('Ошибка сети', 'error');
+        showToastMessage('Ошибка сети', 'error');
         return false;
-    } finally {
-        showLoading(false);
     }
 }
 
@@ -175,7 +192,7 @@ async function register(userData) {
 
 // Выход из системы
 async function logout() {
-    const confirmed = await showConfirm('Вы уверены, что хотите выйти?');
+    const confirmed = await showConfirmMessage('Вы уверены, что хотите выйти?');
     
     if (confirmed) {
         // Очищаем локальные данные
@@ -194,10 +211,15 @@ async function logout() {
         updateUserInterface();
         
         // Показываем форму входа
-        showAuthModal();
+        if (typeof showAuthModal === 'function') {
+            showAuthModal();
+        }
         
-        showToast('Вы вышли из системы', 'info');
+        showToastMessage('Вы вышли из системы', 'info');
         console.log('👋 Выход выполнен');
+        
+        // Перезагружаем страницу для очистки состояния
+        window.location.reload();
     }
 }
 
@@ -206,8 +228,6 @@ async function logout() {
 // Обновление данных пользователя
 async function updateProfile(field, value) {
     if (!currentUser) return false;
-    
-    showLoading(true);
     
     try {
         const updateData = {};
@@ -219,18 +239,16 @@ async function updateProfile(field, value) {
             currentUser[field] = value;
             localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
             updateUserInterface();
-            showToast('Данные обновлены', 'success');
+            showToastMessage('Данные обновлены', 'success');
             return true;
         } else {
-            showToast(response.data.error || 'Ошибка обновления', 'error');
+            showToastMessage(response.data.error || 'Ошибка обновления', 'error');
             return false;
         }
     } catch (error) {
         console.error('Update profile error:', error);
-        showToast('Ошибка сети', 'error');
+        showToastMessage('Ошибка сети', 'error');
         return false;
-    } finally {
-        showLoading(false);
     }
 }
 
@@ -242,156 +260,34 @@ function updateUserInterface() {
     
     // Показываем/скрываем элементы для авторизованных пользователей
     document.querySelectorAll('.auth-required').forEach(el => {
-        el.style.display = isLoggedIn ? 'block' : 'none';
+        if (el) el.style.display = isLoggedIn ? 'block' : 'none';
     });
     
     document.querySelectorAll('.guest-only').forEach(el => {
-        el.style.display = isLoggedIn ? 'none' : 'block';
+        if (el) el.style.display = isLoggedIn ? 'none' : 'block';
     });
     
     // Обновляем информацию о пользователе
-    if (isLoggedIn) {
+    if (isLoggedIn && currentUser) {
         const userNameEl = document.getElementById('userName');
         const userIdEl = document.getElementById('userId');
         const bonusBadge = document.getElementById('bonusBadge');
         
-        if (userNameEl) userNameEl.textContent = currentUser.name;
+        if (userNameEl) userNameEl.textContent = currentUser.name || 'Пользователь';
         if (userIdEl) userIdEl.textContent = `ID: ${currentUser.short_id || '---'}`;
         if (bonusBadge) bonusBadge.textContent = `${currentUser.bonus_balance || 0}💎`;
         
         // Показываем админ-панель для администратора
-        if (currentUser.user_id === CONFIG?.ADMIN_ID) {
+        const adminId = window.CONFIG?.ADMIN_ID || '1209283843';
+        if (currentUser.user_id === adminId) {
             document.querySelectorAll('.admin-only').forEach(el => {
-                el.style.display = 'block';
+                if (el) el.style.display = 'block';
             });
         }
     }
 }
 
-// ==================== МОДАЛЬНЫЕ ОКНА ====================
-
-// Показ модального окна входа
-function showAuthModal() {
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.id = 'authModal';
-    modal.innerHTML = `
-        <div class="modal-content" style="max-width: 400px;">
-            <div class="modal-header">
-                <h3 class="modal-title">Вход в систему</h3>
-                <button class="modal-close" onclick="closeModal('authModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <!-- Telegram вход -->
-                <div id="telegramLoginWidget" style="margin-bottom: 20px;"></div>
-                
-                <div style="text-align: center; margin: 15px 0; color: #999;">или</div>
-                
-                <!-- Вход по телефону -->
-                <div class="form-group">
-                    <label class="form-label">Телефон</label>
-                    <input type="tel" class="form-input" id="loginPhone" placeholder="+7 (999) 123-45-67">
-                </div>
-                <button class="btn btn-primary" onclick="handleLogin()">Войти</button>
-                <button class="btn btn-secondary" onclick="showRegisterModal()">Зарегистрироваться</button>
-            </div>
-        </div>
-    `;
-    
-    document.getElementById('modalContainer').appendChild(modal);
-    
-    // Инициализируем виджет Telegram (если есть токен)
-    if (CONFIG?.TELEGRAM_BOT_USERNAME) {
-        const widget = document.getElementById('telegramLoginWidget');
-        widget.innerHTML = `
-            <script async src="https://telegram.org/js/telegram-widget.js?22"
-                data-telegram-login="${CONFIG.TELEGRAM_BOT_USERNAME}"
-                data-size="large"
-                data-radius="10"
-                data-auth-url="${window.location.origin}/api/auth/telegram/callback"
-                data-request-access="write"></script>
-        `;
-    }
-}
-
-// Показ модального окна регистрации
-function showRegisterModal() {
-    closeModal('authModal');
-    
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.id = 'registerModal';
-    modal.innerHTML = `
-        <div class="modal-content" style="max-width: 400px;">
-            <div class="modal-header">
-                <h3 class="modal-title">Регистрация</h3>
-                <button class="modal-close" onclick="closeModal('registerModal')">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="form-group">
-                    <label class="form-label">Имя *</label>
-                    <input type="text" class="form-input" id="regName" placeholder="Ваше имя" autocomplete="name">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Телефон *</label>
-                    <input type="tel" class="form-input" id="regPhone" placeholder="+7 (999) 123-45-67" autocomplete="tel">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Адрес</label>
-                    <input type="text" class="form-input" id="regAddress" placeholder="Ваш адрес" autocomplete="address">
-                </div>
-                <button class="btn btn-primary" onclick="handleRegister()">Зарегистрироваться</button>
-            </div>
-        </div>
-    `;
-    
-    document.getElementById('modalContainer').appendChild(modal);
-}
-
-// Обработчик входа
-async function handleLogin() {
-    const phone = document.getElementById('loginPhone').value;
-    const success = await login(phone);
-    
-    if (success) {
-        closeModal('authModal');
-        if (typeof loadPage === 'function') {
-            loadPage('main');
-        }
-    }
-}
-
-// Обработчик регистрации
-async function handleRegister() {
-    const name = document.getElementById('regName').value;
-    const phone = document.getElementById('regPhone').value;
-    const address = document.getElementById('regAddress').value;
-    
-    const success = await register({ name, phone, address });
-    
-    if (success) {
-        closeModal('registerModal');
-        if (typeof loadPage === 'function') {
-            loadPage('main');
-        }
-    }
-}
-
-// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-// Закрытие модального окна
-function closeModal(modalId) {
-    const modal = document.getElementById(modalId);
-    if (modal) modal.remove();
-}
-
-// Показ загрузчика
-function showLoading(show) {
-    const loader = document.getElementById('globalLoader');
-    if (loader) {
-        loader.style.display = show ? 'flex' : 'none';
-    }
-}
+// ==================== ГЕТТЕРЫ ====================
 
 // Получение текущего токена
 function getAuthToken() {
@@ -405,16 +301,19 @@ function getCurrentUser() {
 
 // Проверка, авторизован ли пользователь
 function isAuthenticated() {
-    return !!getCurrentUser();
+    return !!getCurrentUser() && !!getAuthToken();
 }
 
 // Проверка, является ли пользователь админом
 function isAdmin() {
     const user = getCurrentUser();
-    return user && user.user_id === CONFIG?.ADMIN_ID;
+    const adminId = window.CONFIG?.ADMIN_ID || '1209283843';
+    return user && user.user_id === adminId;
 }
 
-// Экспортируем функции
+// ==================== ЭКСПОРТ ====================
+
+// Экспортируем функции в глобальный объект
 window.auth = {
     init: initAuth,
     login,
@@ -427,3 +326,5 @@ window.auth = {
     isAdmin,
     getToken: getAuthToken
 };
+
+console.log('🔐 Модуль авторизации загружен');

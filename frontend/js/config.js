@@ -1,14 +1,16 @@
-// Конфигурация приложения
-const CONFIG = {
+// Конфигурация приложения    
+window.CONFIG = {
     API_URL: window.location.origin,
     APP_NAME: 'У Нас Чисто',
     APP_VERSION: '1.0.0',
     
-    // Telegram ID администратора (вставьте свой)
-    ADMIN_ID: '764221355',  // ← ЗАМЕНИТЕ НА ВАШ TELEGRAM ID
+    // Telegram ID администратора
+    ADMIN_ID: '764221355',  // ← ЗАМЕНИТЕ НА ВАШ ID
     
-    // Telegram бот для входа (если есть)
-    TELEGRAM_BOT_USERNAME: '@UNCH_ORIGINAL_BOT',  // Опционально
+    // Telegram бот для входа (ИМЯ БЕЗ @)
+    TELEGRAM_BOT_USERNAME: 'UNCH_ORIGINAL',  // ← ВАШ БОТ
+    
+    // ... остальные настройки
     
     // Настройки бонусов
     BONUS_PERCENT: 10,

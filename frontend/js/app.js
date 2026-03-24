@@ -621,6 +621,32 @@ function escapeHtml(str) {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+
+
+// ==================== ИНИЦИАЛИЗАЦИЯ УВЕДОМЛЕНИЙ ====================
+
+// При входе админа - запрашиваем разрешение на уведомления
+function initAdminNotifications() {
+    const user = window.auth?.getCurrentUser();
+    const isAdmin = user && user.user_id === CONFIG?.ADMIN_ID;
+    
+    if (isAdmin && 'Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().then(permission => {
+            console.log('📢 Уведомления:', permission);
+        });
+    }
+}
+
+// Вызываем после авторизации
+const originalUpdateUserInterface = window.updateUserInterface;
+window.updateUserInterface = function() {
+    if (originalUpdateUserInterface) originalUpdateUserInterface();
+    initAdminNotifications();
+};
+
+
+
+
 // Экспорт глобальных функций
 window.loadPage = loadPage;
 window.createOrder = createOrder;

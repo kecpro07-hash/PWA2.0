@@ -1,6 +1,7 @@
 import os
 import logging
 import secrets
+import json
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -10,7 +11,7 @@ from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
     jwt_required, get_jwt_identity, get_jwt
 )
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room
 import psycopg2
 import psycopg2.extras
 
@@ -149,6 +150,17 @@ def init_db():
             )
         """)
         
+        # Push-подписки для уведомлений
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS push_subscriptions (
+                id SERIAL PRIMARY KEY,
+                user_id TEXT UNIQUE,
+                subscription JSONB NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
         conn.commit()
         logger.info("✅ База данных инициализирована")
         return True
@@ -191,6 +203,94 @@ def generate_short_id():
 def calculate_price(bags):
     """Расчет стоимости"""
     return 100 + (bags - 1) * 25 if bags > 0 else 0
+
+# ================== УВЕДОМЛЕНИЯ АДМИНА ==================
+
+# Хранилище для активных WebSocket соединений админа
+admin_sessions = set()
+
+@socketio.on('connect')
+def handle_connect():
+    """Обработка подключения WebSocket"""
+    logger.info(f"🔌 WebSocket подключен: {request.sid}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Обработка отключения WebSocket"""
+    logger.info(f"🔌 WebSocket отключен: {request.sid}")
+    if request.sid in admin_sessions:
+        admin_sessions.remove(request.sid)
+
+@socketio.on('join_admin')
+def handle_join_admin(data):
+    """Админ подключается к админской комнате"""
+    try:
+        token = data.get('token')
+        if not token:
+            logger.warning("Нет токена при подключении к админ-комнате")
+            return
+        
+        # Декодируем токен
+        from flask_jwt_extended import decode_token
+        decoded = decode_token(token)
+        user_id = decoded['sub']
+        admin_id = os.environ.get('ADMIN_ID')
+        
+        if str(user_id) == str(admin_id):
+            admin_sessions.add(request.sid)
+            join_room('admin_room')
+            emit('admin_joined', {'status': 'connected', 'message': 'Вы подключены к админ-панели'})
+            logger.info(f"👑 Админ {user_id} подключен к админ-комнате")
+        else:
+            logger.warning(f"Попытка подключения не-админа: {user_id}")
+            
+    except Exception as e:
+        logger.error(f"Ошибка подключения админа: {e}")
+
+def send_admin_notification(order_data):
+    """Отправляет уведомление админу через WebSocket"""
+    try:
+        socketio.emit('new_order', {
+            'order_number': order_data['number'],
+            'name': order_data['name'],
+            'short_id': order_data['short_id'],
+            'amount': order_data['final_amount'],
+            'address': order_data['address'],
+            'time': order_data['exact_time'],
+            'bags': order_data['bags'],
+            'phone': order_data['phone'],
+            'timestamp': datetime.now().isoformat()
+        }, room='admin_room')
+        logger.info(f"📨 WebSocket уведомление отправлено для заказа {order_data['number']}")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка отправки WebSocket уведомления: {e}")
+        return False
+
+def send_push_notification_to_admin(title, body, data=None):
+    """Отправляет WebPush уведомление админу"""
+    try:
+        conn = get_db()
+        if not conn:
+            return False
+        
+        cur = conn.cursor()
+        admin_id = os.environ.get('ADMIN_ID')
+        cur.execute("SELECT subscription FROM push_subscriptions WHERE user_id = %s", (admin_id,))
+        rows = cur.fetchall()
+        conn.close()
+        
+        for row in rows:
+            subscription = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+            
+            # Отправляем через Web Push API (будет реализовано в браузере)
+            # Здесь пока просто логируем
+            logger.info(f"📨 Push уведомление для админа: {title}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка отправки Push уведомления: {e}")
+        return False
 
 # ================== API ЭНДПОИНТЫ ==================
 
@@ -302,6 +402,10 @@ def login():
         if cur.fetchone():
             return jsonify({'error': 'Пользователь заблокирован'}), 403
         
+        # Получаем бонусы
+        cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user[0],))
+        bonus = cur.fetchone()
+        
         access_token = create_access_token(identity=user[0])
         refresh_token = create_refresh_token(identity=user[0])
         
@@ -314,7 +418,8 @@ def login():
                 'phone': user[2],
                 'address': user[3],
                 'username': user[4],
-                'short_id': user[5]
+                'short_id': user[5],
+                'bonus_balance': bonus[0] if bonus else 0
             }
         })
         
@@ -348,18 +453,17 @@ def get_current_user():
         cur = conn.cursor()
         
         cur.execute("""
-            SELECT user_id, name, phone, address, username, short_id, created_at
-            FROM users WHERE user_id = %s
+            SELECT u.user_id, u.name, u.phone, u.address, u.username, u.short_id, u.created_at,
+                   COALESCE(b.balance, 0) as bonus_balance
+            FROM users u
+            LEFT JOIN bonuses b ON u.user_id = b.user_id
+            WHERE u.user_id = %s
         """, (user_id,))
         
         user = cur.fetchone()
         
         if not user:
             return jsonify({'error': 'Пользователь не найден'}), 404
-        
-        # Бонусы
-        cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
-        bonus = cur.fetchone()
         
         return jsonify({
             'user_id': user[0],
@@ -369,7 +473,7 @@ def get_current_user():
             'username': user[4],
             'short_id': user[5],
             'created_at': user[6].isoformat() if user[6] else None,
-            'bonus_balance': bonus[0] if bonus else 0
+            'bonus_balance': user[7] or 0
         })
         
     except Exception as e:
@@ -572,18 +676,34 @@ def create_order():
         
         conn.commit()
         
-        # Отправка уведомления в Telegram (если есть токен)
+        # Формируем данные для уведомления
+        order_data = {
+            'number': order_number,
+            'name': name,
+            'short_id': short_id,
+            'final_amount': final_amount,
+            'address': data['address'],
+            'exact_time': data['exact_time'],
+            'bags': bags,
+            'phone': phone
+        }
+        
+        # Отправляем WebSocket уведомление админу
+        send_admin_notification(order_data)
+        
+        # Отправляем уведомление в Telegram (если есть токен)
         if os.environ.get('BOT_TOKEN'):
             try:
                 import requests
                 admin_id = os.environ.get('ADMIN_ID')
                 bot_token = os.environ.get('BOT_TOKEN')
                 
-                text = f"📦 НОВЫЙ ЗАКАЗ\nНомер: {order_number}\nАдрес: {data['address']}\nВремя: {data['exact_time']}\nСумма: {final_amount}₽"
+                text = f"📦 НОВЫЙ ЗАКАЗ!\n\n🎫 Номер: {order_number}\n👤 Клиент: {name}\n🆔 ID: {short_id}\n📍 Адрес: {data['address']}\n🕐 Время: {data['exact_time']}\n📦 Пакетов: {bags}\n💰 Сумма: {final_amount}₽\n📱 Телефон: {phone}"
                 url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                requests.post(url, json={'chat_id': admin_id, 'text': text})
-            except:
-                pass
+                requests.post(url, json={'chat_id': admin_id, 'text': text, 'parse_mode': 'HTML'})
+                logger.info(f"📨 Telegram уведомление отправлено для заказа {order_number}")
+            except Exception as e:
+                logger.error(f"Ошибка отправки Telegram уведомления: {e}")
         
         return jsonify({
             'number': order_number,
@@ -959,16 +1079,45 @@ def admin_add_bonus():
     finally:
         conn.close()
 
+@app.route('/api/admin/push/subscribe', methods=['POST'])
+@jwt_required()
+@admin_required
+def push_subscribe():
+    """Сохраняет push-подписку админа"""
+    user_id = get_jwt_identity()
+    subscription = request.json
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO push_subscriptions (user_id, subscription, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) DO UPDATE SET 
+                subscription = EXCLUDED.subscription,
+                updated_at = CURRENT_TIMESTAMP
+        """, (user_id, json.dumps(subscription)))
+        conn.commit()
+        
+        logger.info(f"✅ Push-подписка сохранена для админа {user_id}")
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Ошибка сохранения push-подписки: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
 # ================== WEBHOOK ДЛЯ TELEGRAM ==================
 
 @app.route('/api/telegram/webhook', methods=['POST'])
 def telegram_webhook():
     """Принимает обновления от Telegram бота"""
     update = request.json
-    
-    # Здесь можно обрабатывать сообщения от бота
-    # Например, синхронизировать пользователей
-    
     return jsonify({'ok': True})
 
 # ================== ЗАПУСК ==================

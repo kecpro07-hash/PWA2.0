@@ -3,6 +3,8 @@ import logging
 import secrets
 import hashlib
 import json
+import random
+import string
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -41,6 +43,55 @@ jwt = JWTManager(app)
 
 # WebSocket
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
+
+# ================== НОРМАЛИЗАЦИЯ ТЕЛЕФОНОВ ==================
+
+def normalize_phone(phone):
+    """
+    Приводит телефон к единому формату: +7XXXXXXXXXX (12 символов)
+    Поддерживает форматы: 8XXXXXXXXXX, +7XXXXXXXXXX, 7XXXXXXXXXX, XXXXXXXXXX
+    """
+    if not phone:
+        return None
+    
+    # Удаляем все нецифровые символы
+    digits = ''.join(filter(str.isdigit, phone))
+    
+    # Если меньше 10 цифр - некорректный номер
+    if len(digits) < 10:
+        return None
+    
+    # Если 10 цифр (например, 9123456789) - добавляем +7
+    if len(digits) == 10:
+        return f"+7{digits}"
+    
+    # Если 11 цифр
+    if len(digits) == 11:
+        # Если начинается с 8 (8XXXXXXXXXX) -> +7XXXXXXXXXX
+        if digits.startswith('8'):
+            return f"+7{digits[1:]}"
+        # Если начинается с 7 (7XXXXXXXXXX) -> +7XXXXXXXXXX
+        if digits.startswith('7'):
+            return f"+7{digits}"
+    
+    # Если 12 цифр и начинается с 79
+    if len(digits) == 12 and digits.startswith('79'):
+        return f"+{digits}"
+    
+    # Если уже есть +
+    if phone.startswith('+'):
+        if digits.startswith('79'):
+            return phone
+    
+    # По умолчанию возвращаем как есть
+    return phone
+
+def validate_phone(phone):
+    """Проверяет, является ли номер корректным российским номером"""
+    normalized = normalize_phone(phone)
+    if not normalized:
+        return False
+    return normalized.startswith('+7') and len(normalized) == 12
 
 # ================== БАЗА ДАННЫХ ==================
 
@@ -201,16 +252,12 @@ def verify_password(password, stored_hash):
 
 def generate_order_number():
     """Генерация номера заказа"""
-    import random
-    import string
     letters = ''.join(random.choices(string.ascii_uppercase, k=3))
     numbers = ''.join(random.choices(string.digits, k=5))
     return f"{letters}{numbers}"
 
 def generate_short_id():
     """Генерация короткого ID"""
-    import random
-    import string
     while True:
         short_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
         conn = get_db()
@@ -255,6 +302,12 @@ def register():
     if len(data['password']) < 4:
         return jsonify({'error': 'Пароль должен быть не менее 4 символов'}), 400
     
+    # Нормализуем телефон
+    normalized_phone = normalize_phone(data['phone'])
+    
+    if not normalized_phone or not validate_phone(normalized_phone):
+        return jsonify({'error': 'Некорректный номер телефона'}), 400
+    
     conn = get_db()
     if not conn:
         return jsonify({'error': 'Ошибка базы данных'}), 500
@@ -262,8 +315,8 @@ def register():
     try:
         cur = conn.cursor()
         
-        # Проверка существующего пользователя по телефону
-        cur.execute("SELECT user_id FROM users WHERE phone = %s", (data['phone'],))
+        # Проверяем по нормализованному телефону
+        cur.execute("SELECT user_id FROM users WHERE phone = %s", (normalized_phone,))
         if cur.fetchone():
             return jsonify({'error': 'Пользователь с таким телефоном уже существует'}), 400
         
@@ -274,12 +327,12 @@ def register():
         # Хешируем пароль
         password_hash = hash_password(data['password'])
         
-        # Создание пользователя
+        # Создание пользователя с нормализованным телефоном
         cur.execute("""
             INSERT INTO users (user_id, name, phone, address, username, short_id, password_hash)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING user_id
-        """, (user_id, data['name'], data['phone'], data.get('address', ''), 
+        """, (user_id, data['name'], normalized_phone, data.get('address', ''), 
               data.get('username', ''), short_id, password_hash))
         
         # Создание бонусного счета
@@ -304,7 +357,7 @@ def register():
             'user': {
                 'user_id': user_id,
                 'name': data['name'],
-                'phone': data['phone'],
+                'phone': normalized_phone,
                 'address': data.get('address', ''),
                 'username': data.get('username', ''),
                 'short_id': short_id,
@@ -327,6 +380,12 @@ def login():
     if not data.get('phone') or not data.get('password'):
         return jsonify({'error': 'Телефон и пароль обязательны'}), 400
     
+    # Нормализуем телефон
+    normalized_phone = normalize_phone(data['phone'])
+    
+    if not normalized_phone:
+        return jsonify({'error': 'Некорректный номер телефона'}), 400
+    
     conn = get_db()
     if not conn:
         return jsonify({'error': 'Ошибка базы данных'}), 500
@@ -337,7 +396,7 @@ def login():
         cur.execute("""
             SELECT user_id, name, phone, address, username, short_id, password_hash
             FROM users WHERE phone = %s
-        """, (data['phone'],))
+        """, (normalized_phone,))
         
         user = cur.fetchone()
         
@@ -416,21 +475,17 @@ def change_password():
     try:
         cur = conn.cursor()
         
-        # Получаем текущий пароль
         cur.execute("SELECT password_hash FROM users WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         
         if not row:
             return jsonify({'error': 'Пользователь не найден'}), 404
         
-        # Проверяем старый пароль
         if not verify_password(data['old_password'], row[0]):
             return jsonify({'error': 'Неверный старый пароль'}), 401
         
-        # Хешируем новый пароль
         new_hash = hash_password(data['new_password'])
         
-        # Обновляем пароль
         cur.execute("""
             UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = %s
@@ -457,6 +512,11 @@ def reset_password():
     if not data.get('phone'):
         return jsonify({'error': 'Телефон обязателен'}), 400
     
+    normalized_phone = normalize_phone(data['phone'])
+    
+    if not normalized_phone:
+        return jsonify({'error': 'Некорректный номер телефона'}), 400
+    
     conn = get_db()
     if not conn:
         return jsonify({'error': 'Ошибка базы данных'}), 500
@@ -464,17 +524,14 @@ def reset_password():
     try:
         cur = conn.cursor()
         
-        cur.execute("SELECT user_id, name FROM users WHERE phone = %s", (data['phone'],))
+        cur.execute("SELECT user_id, name FROM users WHERE phone = %s", (normalized_phone,))
         user = cur.fetchone()
         
         if not user:
             return jsonify({'error': 'Пользователь не найден'}), 404
         
-        # Генерируем временный код
-        import random
         reset_code = ''.join(random.choices('0123456789', k=6))
         
-        # Сохраняем код в БД (истекает через 15 минут)
         cur.execute("""
             INSERT INTO password_resets (user_id, code, expires_at)
             VALUES (%s, %s, NOW() + INTERVAL '15 minutes')
@@ -484,12 +541,10 @@ def reset_password():
         """, (user[0], reset_code))
         conn.commit()
         
-        # В реальном приложении здесь отправка SMS
-        # Для демо возвращаем код
         return jsonify({
             'success': True,
             'message': 'Код восстановления отправлен',
-            'reset_code': reset_code  # В продакшене УДАЛИТЬ!
+            'reset_code': reset_code
         })
         
     except Exception as e:
@@ -510,6 +565,11 @@ def confirm_reset():
     if len(data['new_password']) < 4:
         return jsonify({'error': 'Пароль должен быть не менее 4 символов'}), 400
     
+    normalized_phone = normalize_phone(data['phone'])
+    
+    if not normalized_phone:
+        return jsonify({'error': 'Некорректный номер телефона'}), 400
+    
     conn = get_db()
     if not conn:
         return jsonify({'error': 'Ошибка базы данных'}), 500
@@ -517,14 +577,12 @@ def confirm_reset():
     try:
         cur = conn.cursor()
         
-        # Получаем пользователя
-        cur.execute("SELECT user_id FROM users WHERE phone = %s", (data['phone'],))
+        cur.execute("SELECT user_id FROM users WHERE phone = %s", (normalized_phone,))
         user = cur.fetchone()
         
         if not user:
             return jsonify({'error': 'Пользователь не найден'}), 404
         
-        # Проверяем код восстановления
         cur.execute("""
             SELECT code FROM password_resets 
             WHERE user_id = %s AND expires_at > NOW()
@@ -535,14 +593,12 @@ def confirm_reset():
         if not reset or reset[0] != data['code']:
             return jsonify({'error': 'Неверный или истекший код'}), 400
         
-        # Обновляем пароль
         new_hash = hash_password(data['new_password'])
         cur.execute("""
             UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = %s
         """, (new_hash, user[0]))
         
-        # Удаляем использованный код
         cur.execute("DELETE FROM password_resets WHERE user_id = %s", (user[0],))
         
         conn.commit()
@@ -623,12 +679,17 @@ def update_user():
             values.append(data['name'])
         
         if 'phone' in data:
-            # Проверяем, не занят ли новый телефон
-            cur.execute("SELECT user_id FROM users WHERE phone = %s AND user_id != %s", (data['phone'], user_id))
+            normalized_new_phone = normalize_phone(data['phone'])
+            if not normalized_new_phone:
+                return jsonify({'error': 'Некорректный номер телефона'}), 400
+            
+            cur.execute("SELECT user_id FROM users WHERE phone = %s AND user_id != %s", 
+                        (normalized_new_phone, user_id))
             if cur.fetchone():
                 return jsonify({'error': 'Телефон уже используется'}), 400
+            
             updates.append("phone = %s")
-            values.append(data['phone'])
+            values.append(normalized_new_phone)
         
         if 'address' in data:
             updates.append("address = %s")
@@ -730,7 +791,6 @@ def create_order():
     try:
         cur = conn.cursor()
         
-        # Получаем данные пользователя
         cur.execute("""
             SELECT name, phone, username, short_id 
             FROM users WHERE user_id = %s
@@ -742,20 +802,16 @@ def create_order():
         
         name, phone, username, short_id = user
         
-        # Генерация номера заказа
         order_number = generate_order_number()
         
-        # Расчет стоимости
         bags = int(data['bags'])
         amount = calculate_price(bags)
         
-        # Обработка бонусов
         bonus_used = int(data.get('bonus_used', 0))
         bonus_discount = 0
         final_amount = amount
         
         if bonus_used > 0:
-            # Проверяем баланс
             cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
             bonus_row = cur.fetchone()
             current_bonus = bonus_row[0] if bonus_row else 0
@@ -766,7 +822,6 @@ def create_order():
                 bonus_discount = min(discount_rub, max_discount)
                 final_amount = amount - bonus_discount
                 
-                # Списание бонусов
                 cur.execute("""
                     UPDATE bonuses 
                     SET balance = balance - %s,
@@ -782,7 +837,6 @@ def create_order():
             else:
                 bonus_used = 0
         
-        # Создание заказа
         cur.execute("""
             INSERT INTO orders (
                 number, user_id, name, phone, address, username, short_id,
@@ -798,7 +852,6 @@ def create_order():
         
         conn.commit()
         
-        # Отправляем WebSocket уведомление (для админ-панели)
         socketio.emit('new_order', {
             'order_number': order_number,
             'name': name,
@@ -1172,7 +1225,7 @@ def admin_add_bonus():
     finally:
         conn.close()
 
-# ================== WEBSOCKET ДЛЯ АДМИНКИ ==================
+# ================== WEBSOCKET ==================
 
 @socketio.on('connect')
 def handle_connect():

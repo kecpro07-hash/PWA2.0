@@ -1,10 +1,8 @@
-// ==================== МОДУЛЬ АВТОРИЗАЦИИ С ПАРОЛЕМ ====================
+// ==================== МОДУЛЬ АВТОРИЗАЦИИ ====================
 
-// Состояние авторизации
 let currentUser = null;
 let authToken = null;
 
-// Константы
 const TOKEN_KEY = 'auth_token';
 const USER_KEY = 'user_data';
 
@@ -205,7 +203,7 @@ async function requestPasswordReset(phone) {
 
 async function confirmPasswordReset(phone, code, newPassword) {
     if (!code || code.length !== 6) {
-        showToast('Введите корректный код', 'error');
+        showToast('Введите 6-значный код', 'error');
         return false;
     }
     
@@ -501,7 +499,6 @@ function showForgotPasswordModal() {
     }
     modalContainer.appendChild(modal);
     
-    // Шаг 1: Отправка кода
     modal.querySelector('#sendCodeBtn').addEventListener('click', async () => {
         const phone = modal.querySelector('#resetPhone').value;
         if (!phone || phone.length < 10) {
@@ -519,7 +516,6 @@ function showForgotPasswordModal() {
         }
     });
     
-    // Шаг 2: Проверка кода
     modal.querySelector('#verifyCodeBtn').addEventListener('click', () => {
         const code = modal.querySelector('#resetCodeInput').value;
         if (!code || code.length !== 6) {
@@ -532,7 +528,6 @@ function showForgotPasswordModal() {
         modal.querySelector('#stepPassword').style.display = 'block';
     });
     
-    // Шаг 3: Смена пароля
     modal.querySelector('#resetPasswordBtn').addEventListener('click', async () => {
         const newPassword = modal.querySelector('#newPassword').value;
         const confirmPassword = modal.querySelector('#confirmNewPassword').value;

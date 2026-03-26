@@ -1,6 +1,7 @@
 import os
 import logging
 import secrets
+import hashlib
 import json
 from datetime import datetime, timedelta
 from functools import wraps
@@ -9,7 +10,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager, create_access_token, create_refresh_token,
-    jwt_required, get_jwt_identity, get_jwt
+    jwt_required, get_jwt_identity
 )
 from flask_socketio import SocketIO, emit, join_room
 import psycopg2
@@ -61,17 +62,19 @@ def init_db():
     try:
         cur = conn.cursor()
         
-        # Пользователи
+        # Пользователи (с паролем)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id TEXT PRIMARY KEY,
                 name TEXT,
-                phone TEXT,
+                phone TEXT UNIQUE,
                 address TEXT,
                 username TEXT,
                 short_id TEXT UNIQUE,
                 password_hash TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP,
+                last_login TIMESTAMP
             )
         """)
         
@@ -150,14 +153,14 @@ def init_db():
             )
         """)
         
-        # Push-подписки для уведомлений
+        # Восстановление паролей
         cur.execute("""
-            CREATE TABLE IF NOT EXISTS push_subscriptions (
+            CREATE TABLE IF NOT EXISTS password_resets (
                 id SERIAL PRIMARY KEY,
-                user_id TEXT UNIQUE,
-                subscription JSONB NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                code TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         
@@ -174,6 +177,25 @@ def init_db():
 
 # Инициализация при запуске
 init_db()
+
+# ================== ФУНКЦИИ ДЛЯ ПАРОЛЕЙ ==================
+
+def hash_password(password):
+    """Хеширует пароль с солью"""
+    salt = secrets.token_hex(16)
+    hash_obj = hashlib.sha256((password + salt).encode()).hexdigest()
+    return f"{salt}${hash_obj}"
+
+def verify_password(password, stored_hash):
+    """Проверяет пароль"""
+    try:
+        if not stored_hash:
+            return False
+        salt, hash_value = stored_hash.split('$')
+        computed_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+        return computed_hash == hash_value
+    except:
+        return False
 
 # ================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==================
 
@@ -204,94 +226,6 @@ def calculate_price(bags):
     """Расчет стоимости"""
     return 100 + (bags - 1) * 25 if bags > 0 else 0
 
-# ================== УВЕДОМЛЕНИЯ АДМИНА ==================
-
-# Хранилище для активных WebSocket соединений админа
-admin_sessions = set()
-
-@socketio.on('connect')
-def handle_connect():
-    """Обработка подключения WebSocket"""
-    logger.info(f"🔌 WebSocket подключен: {request.sid}")
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Обработка отключения WebSocket"""
-    logger.info(f"🔌 WebSocket отключен: {request.sid}")
-    if request.sid in admin_sessions:
-        admin_sessions.remove(request.sid)
-
-@socketio.on('join_admin')
-def handle_join_admin(data):
-    """Админ подключается к админской комнате"""
-    try:
-        token = data.get('token')
-        if not token:
-            logger.warning("Нет токена при подключении к админ-комнате")
-            return
-        
-        # Декодируем токен
-        from flask_jwt_extended import decode_token
-        decoded = decode_token(token)
-        user_id = decoded['sub']
-        admin_id = os.environ.get('ADMIN_ID')
-        
-        if str(user_id) == str(admin_id):
-            admin_sessions.add(request.sid)
-            join_room('admin_room')
-            emit('admin_joined', {'status': 'connected', 'message': 'Вы подключены к админ-панели'})
-            logger.info(f"👑 Админ {user_id} подключен к админ-комнате")
-        else:
-            logger.warning(f"Попытка подключения не-админа: {user_id}")
-            
-    except Exception as e:
-        logger.error(f"Ошибка подключения админа: {e}")
-
-def send_admin_notification(order_data):
-    """Отправляет уведомление админу через WebSocket"""
-    try:
-        socketio.emit('new_order', {
-            'order_number': order_data['number'],
-            'name': order_data['name'],
-            'short_id': order_data['short_id'],
-            'amount': order_data['final_amount'],
-            'address': order_data['address'],
-            'time': order_data['exact_time'],
-            'bags': order_data['bags'],
-            'phone': order_data['phone'],
-            'timestamp': datetime.now().isoformat()
-        }, room='admin_room')
-        logger.info(f"📨 WebSocket уведомление отправлено для заказа {order_data['number']}")
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка отправки WebSocket уведомления: {e}")
-        return False
-
-def send_push_notification_to_admin(title, body, data=None):
-    """Отправляет WebPush уведомление админу"""
-    try:
-        conn = get_db()
-        if not conn:
-            return False
-        
-        cur = conn.cursor()
-        admin_id = os.environ.get('ADMIN_ID')
-        cur.execute("SELECT subscription FROM push_subscriptions WHERE user_id = %s", (admin_id,))
-        rows = cur.fetchall()
-        conn.close()
-        
-        for row in rows:
-            subscription = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-            
-            # Отправляем через Web Push API (будет реализовано в браузере)
-            # Здесь пока просто логируем
-            logger.info(f"📨 Push уведомление для админа: {title}")
-        
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка отправки Push уведомления: {e}")
-        return False
-
 # ================== API ЭНДПОИНТЫ ==================
 
 @app.route('/')
@@ -312,11 +246,14 @@ def health():
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """Регистрация пользователя"""
+    """Регистрация пользователя с паролем"""
     data = request.json
     
-    if not data.get('name') or not data.get('phone'):
-        return jsonify({'error': 'Имя и телефон обязательны'}), 400
+    if not data.get('name') or not data.get('phone') or not data.get('password'):
+        return jsonify({'error': 'Имя, телефон и пароль обязательны'}), 400
+    
+    if len(data['password']) < 4:
+        return jsonify({'error': 'Пароль должен быть не менее 4 символов'}), 400
     
     conn = get_db()
     if not conn:
@@ -325,7 +262,7 @@ def register():
     try:
         cur = conn.cursor()
         
-        # Проверка существующего пользователя
+        # Проверка существующего пользователя по телефону
         cur.execute("SELECT user_id FROM users WHERE phone = %s", (data['phone'],))
         if cur.fetchone():
             return jsonify({'error': 'Пользователь с таким телефоном уже существует'}), 400
@@ -334,13 +271,16 @@ def register():
         user_id = str(secrets.randbelow(1000000000))
         short_id = generate_short_id()
         
+        # Хешируем пароль
+        password_hash = hash_password(data['password'])
+        
         # Создание пользователя
         cur.execute("""
-            INSERT INTO users (user_id, name, phone, address, username, short_id)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO users (user_id, name, phone, address, username, short_id, password_hash)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING user_id
         """, (user_id, data['name'], data['phone'], data.get('address', ''), 
-              data.get('username', ''), short_id))
+              data.get('username', ''), short_id, password_hash))
         
         # Создание бонусного счета
         cur.execute("""
@@ -354,6 +294,10 @@ def register():
         access_token = create_access_token(identity=user_id)
         refresh_token = create_refresh_token(identity=user_id)
         
+        # Получаем бонусы
+        cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
+        bonus = cur.fetchone()
+        
         return jsonify({
             'access_token': access_token,
             'refresh_token': refresh_token,
@@ -361,7 +305,10 @@ def register():
                 'user_id': user_id,
                 'name': data['name'],
                 'phone': data['phone'],
-                'short_id': short_id
+                'address': data.get('address', ''),
+                'username': data.get('username', ''),
+                'short_id': short_id,
+                'bonus_balance': bonus[0] if bonus else 0
             }
         })
         
@@ -374,11 +321,11 @@ def register():
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """Вход по телефону"""
+    """Вход по телефону и паролю"""
     data = request.json
     
-    if not data.get('phone'):
-        return jsonify({'error': 'Телефон обязателен'}), 400
+    if not data.get('phone') or not data.get('password'):
+        return jsonify({'error': 'Телефон и пароль обязательны'}), 400
     
     conn = get_db()
     if not conn:
@@ -388,7 +335,7 @@ def login():
         cur = conn.cursor()
         
         cur.execute("""
-            SELECT user_id, name, phone, address, username, short_id
+            SELECT user_id, name, phone, address, username, short_id, password_hash
             FROM users WHERE phone = %s
         """, (data['phone'],))
         
@@ -397,10 +344,20 @@ def login():
         if not user:
             return jsonify({'error': 'Пользователь не найден'}), 404
         
+        # Проверка пароля
+        if not verify_password(data['password'], user[6]):
+            return jsonify({'error': 'Неверный пароль'}), 401
+        
         # Проверка бана
         cur.execute("SELECT user_id FROM banned_users WHERE user_id = %s", (user[0],))
         if cur.fetchone():
             return jsonify({'error': 'Пользователь заблокирован'}), 403
+        
+        # Обновляем время последнего входа
+        cur.execute("""
+            UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = %s
+        """, (user[0],))
+        conn.commit()
         
         # Получаем бонусы
         cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user[0],))
@@ -436,6 +393,168 @@ def refresh():
     user_id = get_jwt_identity()
     access_token = create_access_token(identity=user_id)
     return jsonify({'access_token': access_token})
+
+# ================== СМЕНА ПАРОЛЯ ==================
+
+@app.route('/api/user/change-password', methods=['POST'])
+@jwt_required()
+def change_password():
+    """Смена пароля"""
+    user_id = get_jwt_identity()
+    data = request.json
+    
+    if not data.get('old_password') or not data.get('new_password'):
+        return jsonify({'error': 'Старый и новый пароль обязательны'}), 400
+    
+    if len(data['new_password']) < 4:
+        return jsonify({'error': 'Новый пароль должен быть не менее 4 символов'}), 400
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        
+        # Получаем текущий пароль
+        cur.execute("SELECT password_hash FROM users WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        
+        if not row:
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        
+        # Проверяем старый пароль
+        if not verify_password(data['old_password'], row[0]):
+            return jsonify({'error': 'Неверный старый пароль'}), 401
+        
+        # Хешируем новый пароль
+        new_hash = hash_password(data['new_password'])
+        
+        # Обновляем пароль
+        cur.execute("""
+            UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+        """, (new_hash, user_id))
+        
+        conn.commit()
+        
+        return jsonify({'success': True, 'message': 'Пароль успешно изменен'})
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Ошибка смены пароля: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+# ================== ВОССТАНОВЛЕНИЕ ПАРОЛЯ ==================
+
+@app.route('/api/auth/reset-password', methods=['POST'])
+def reset_password():
+    """Запрос на восстановление пароля"""
+    data = request.json
+    
+    if not data.get('phone'):
+        return jsonify({'error': 'Телефон обязателен'}), 400
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("SELECT user_id, name FROM users WHERE phone = %s", (data['phone'],))
+        user = cur.fetchone()
+        
+        if not user:
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        
+        # Генерируем временный код
+        import random
+        reset_code = ''.join(random.choices('0123456789', k=6))
+        
+        # Сохраняем код в БД (истекает через 15 минут)
+        cur.execute("""
+            INSERT INTO password_resets (user_id, code, expires_at)
+            VALUES (%s, %s, NOW() + INTERVAL '15 minutes')
+            ON CONFLICT (user_id) DO UPDATE SET 
+                code = EXCLUDED.code,
+                expires_at = EXCLUDED.expires_at
+        """, (user[0], reset_code))
+        conn.commit()
+        
+        # В реальном приложении здесь отправка SMS
+        # Для демо возвращаем код
+        return jsonify({
+            'success': True,
+            'message': 'Код восстановления отправлен',
+            'reset_code': reset_code  # В продакшене УДАЛИТЬ!
+        })
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Ошибка восстановления пароля: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/auth/confirm-reset', methods=['POST'])
+def confirm_reset():
+    """Подтверждение восстановления пароля"""
+    data = request.json
+    
+    if not data.get('phone') or not data.get('code') or not data.get('new_password'):
+        return jsonify({'error': 'Все поля обязательны'}), 400
+    
+    if len(data['new_password']) < 4:
+        return jsonify({'error': 'Пароль должен быть не менее 4 символов'}), 400
+    
+    conn = get_db()
+    if not conn:
+        return jsonify({'error': 'Ошибка базы данных'}), 500
+    
+    try:
+        cur = conn.cursor()
+        
+        # Получаем пользователя
+        cur.execute("SELECT user_id FROM users WHERE phone = %s", (data['phone'],))
+        user = cur.fetchone()
+        
+        if not user:
+            return jsonify({'error': 'Пользователь не найден'}), 404
+        
+        # Проверяем код восстановления
+        cur.execute("""
+            SELECT code FROM password_resets 
+            WHERE user_id = %s AND expires_at > NOW()
+        """, (user[0],))
+        
+        reset = cur.fetchone()
+        
+        if not reset or reset[0] != data['code']:
+            return jsonify({'error': 'Неверный или истекший код'}), 400
+        
+        # Обновляем пароль
+        new_hash = hash_password(data['new_password'])
+        cur.execute("""
+            UPDATE users SET password_hash = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = %s
+        """, (new_hash, user[0]))
+        
+        # Удаляем использованный код
+        cur.execute("DELETE FROM password_resets WHERE user_id = %s", (user[0],))
+        
+        conn.commit()
+        
+        return jsonify({'success': True, 'message': 'Пароль успешно изменен'})
+        
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Ошибка подтверждения восстановления: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        conn.close()
 
 # ================== ПОЛЬЗОВАТЕЛИ ==================
 
@@ -504,6 +623,10 @@ def update_user():
             values.append(data['name'])
         
         if 'phone' in data:
+            # Проверяем, не занят ли новый телефон
+            cur.execute("SELECT user_id FROM users WHERE phone = %s AND user_id != %s", (data['phone'], user_id))
+            if cur.fetchone():
+                return jsonify({'error': 'Телефон уже используется'}), 400
             updates.append("phone = %s")
             values.append(data['phone'])
         
@@ -518,7 +641,7 @@ def update_user():
         
         cur.execute(f"""
             UPDATE users 
-            SET {', '.join(updates)}
+            SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = %s
             RETURNING user_id, name, phone, address, short_id
         """, values)
@@ -536,7 +659,7 @@ def update_user():
         
     except Exception as e:
         conn.rollback()
-        logger.error(f"Ошибка обновления пользователя: {e}")
+        logger.error(f"Ошибка обновления: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()
@@ -638,7 +761,6 @@ def create_order():
             current_bonus = bonus_row[0] if bonus_row else 0
             
             if current_bonus >= bonus_used:
-                # Расчет скидки
                 discount_rub = bonus_used
                 max_discount = amount * 50 // 100
                 bonus_discount = min(discount_rub, max_discount)
@@ -676,34 +798,14 @@ def create_order():
         
         conn.commit()
         
-        # Формируем данные для уведомления
-        order_data = {
-            'number': order_number,
+        # Отправляем WebSocket уведомление (для админ-панели)
+        socketio.emit('new_order', {
+            'order_number': order_number,
             'name': name,
-            'short_id': short_id,
-            'final_amount': final_amount,
+            'amount': final_amount,
             'address': data['address'],
-            'exact_time': data['exact_time'],
-            'bags': bags,
-            'phone': phone
-        }
-        
-        # Отправляем WebSocket уведомление админу
-        send_admin_notification(order_data)
-        
-        # Отправляем уведомление в Telegram (если есть токен)
-        if os.environ.get('BOT_TOKEN'):
-            try:
-                import requests
-                admin_id = os.environ.get('ADMIN_ID')
-                bot_token = os.environ.get('BOT_TOKEN')
-                
-                text = f"📦 НОВЫЙ ЗАКАЗ!\n\n🎫 Номер: {order_number}\n👤 Клиент: {name}\n🆔 ID: {short_id}\n📍 Адрес: {data['address']}\n🕐 Время: {data['exact_time']}\n📦 Пакетов: {bags}\n💰 Сумма: {final_amount}₽\n📱 Телефон: {phone}"
-                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-                requests.post(url, json={'chat_id': admin_id, 'text': text, 'parse_mode': 'HTML'})
-                logger.info(f"📨 Telegram уведомление отправлено для заказа {order_number}")
-            except Exception as e:
-                logger.error(f"Ошибка отправки Telegram уведомления: {e}")
+            'time': data['exact_time']
+        }, room='admin_room')
         
         return jsonify({
             'number': order_number,
@@ -733,7 +835,6 @@ def get_reviews():
     try:
         cur = conn.cursor()
         
-        # Последние 50 отзывов
         cur.execute("""
             SELECT order_number, rating, text, date, short_id
             FROM reviews
@@ -751,7 +852,6 @@ def get_reviews():
                 'short_id': row[4]
             })
         
-        # Статистика
         cur.execute("""
             SELECT 
                 COUNT(*) as total,
@@ -795,7 +895,6 @@ def add_review():
     try:
         cur = conn.cursor()
         
-        # Получаем short_id
         cur.execute("SELECT short_id FROM users WHERE user_id = %s", (user_id,))
         user = cur.fetchone()
         if not user:
@@ -803,7 +902,6 @@ def add_review():
         
         short_id = user[0]
         
-        # Проверяем, что заказ принадлежит пользователю
         cur.execute("""
             SELECT number FROM orders 
             WHERE number = %s AND user_id = %s
@@ -812,7 +910,6 @@ def add_review():
         if not cur.fetchone() and data['order_number'] != "GENERAL":
             return jsonify({'error': 'Заказ не найден'}), 404
         
-        # Добавляем отзыв
         cur.execute("""
             INSERT INTO reviews (user_id, short_id, order_number, rating, text, date, timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -824,7 +921,6 @@ def add_review():
             int(datetime.now().timestamp())
         ))
         
-        # Отмечаем заказ как с отзывом
         if data['order_number'] != "GENERAL":
             cur.execute("""
                 UPDATE orders SET reviewed = TRUE 
@@ -857,12 +953,10 @@ def get_bonus_balance():
     try:
         cur = conn.cursor()
         
-        # Текущий баланс
         cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
         row = cur.fetchone()
         balance = row[0] if row else 0
         
-        # История
         cur.execute("""
             SELECT amount, type, description, created_at
             FROM bonus_history
@@ -969,7 +1063,6 @@ def admin_update_order_status(order_number):
         updated = cur.fetchone()
         
         if updated and status == 'выполнен':
-            # Начисляем бонусы (10% от суммы)
             order_number, user_id, amount = updated
             bonus_amount = amount * 10 // 100
             
@@ -1079,46 +1172,34 @@ def admin_add_bonus():
     finally:
         conn.close()
 
-@app.route('/api/admin/push/subscribe', methods=['POST'])
-@jwt_required()
-@admin_required
-def push_subscribe():
-    """Сохраняет push-подписку админа"""
-    user_id = get_jwt_identity()
-    subscription = request.json
-    
-    conn = get_db()
-    if not conn:
-        return jsonify({'error': 'Ошибка базы данных'}), 500
-    
+# ================== WEBSOCKET ДЛЯ АДМИНКИ ==================
+
+@socketio.on('connect')
+def handle_connect():
+    logger.info(f"🔌 WebSocket подключен: {request.sid}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    logger.info(f"🔌 WebSocket отключен: {request.sid}")
+
+@socketio.on('join_admin')
+def handle_join_admin(data):
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO push_subscriptions (user_id, subscription, updated_at)
-            VALUES (%s, %s, CURRENT_TIMESTAMP)
-            ON CONFLICT (user_id) DO UPDATE SET 
-                subscription = EXCLUDED.subscription,
-                updated_at = CURRENT_TIMESTAMP
-        """, (user_id, json.dumps(subscription)))
-        conn.commit()
+        token = data.get('token')
+        if not token:
+            return
         
-        logger.info(f"✅ Push-подписка сохранена для админа {user_id}")
-        return jsonify({'success': True})
+        from flask_jwt_extended import decode_token
+        decoded = decode_token(token)
+        user_id = decoded['sub']
+        admin_id = os.environ.get('ADMIN_ID')
         
+        if str(user_id) == str(admin_id):
+            join_room('admin_room')
+            emit('admin_joined', {'status': 'connected'})
+            logger.info(f"👑 Админ {user_id} подключен")
     except Exception as e:
-        conn.rollback()
-        logger.error(f"Ошибка сохранения push-подписки: {e}")
-        return jsonify({'error': str(e)}), 500
-    finally:
-        conn.close()
-
-# ================== WEBHOOK ДЛЯ TELEGRAM ==================
-
-@app.route('/api/telegram/webhook', methods=['POST'])
-def telegram_webhook():
-    """Принимает обновления от Telegram бота"""
-    update = request.json
-    return jsonify({'ok': True})
+        logger.error(f"Ошибка подключения админа: {e}")
 
 # ================== ЗАПУСК ==================
 

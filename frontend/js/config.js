@@ -1,16 +1,12 @@
-// Конфигурация приложения    
+// ==================== КОНФИГУРАЦИЯ ПРИЛОЖЕНИЯ ====================
+
 window.CONFIG = {
     API_URL: window.location.origin,
     APP_NAME: 'У Нас Чисто',
     APP_VERSION: '1.0.0',
     
-    // Telegram ID администратора
-    ADMIN_ID: '764221355',  // ← ЗАМЕНИТЕ НА ВАШ ID
-    
-    // Telegram бот для входа (ИМЯ БЕЗ @)
-    TELEGRAM_BOT_USERNAME: 'UNCH_ORIGINAL',  // ← ВАШ БОТ
-    
-    // ... остальные настройки
+    // Telegram ID администратора (для админ-панели)
+    ADMIN_ID: '764221355',  // ← ВСТАВЬТЕ СВОЙ TELEGRAM ID ДЛЯ ДОСТУПА К АДМИНКЕ
     
     // Настройки бонусов
     BONUS_PERCENT: 10,
@@ -27,7 +23,4 @@ window.CONFIG = {
     SBP_NAME: 'Картавенко В. В.'
 };
 
-// Экспортируем
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = CONFIG;
-}
+console.log('⚙️ Конфигурация загружена');

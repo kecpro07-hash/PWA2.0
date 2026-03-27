@@ -499,22 +499,51 @@ function showForgotPasswordModal() {
     }
     modalContainer.appendChild(modal);
     
-    modal.querySelector('#sendCodeBtn').addEventListener('click', async () => {
-        const phone = modal.querySelector('#resetPhone').value;
-        if (!phone || phone.length < 10) {
-            showToast('Введите корректный телефон', 'error');
-            return;
-        }
-        
-        resetPhone = phone;
-        const result = await window.auth.requestPasswordReset(phone);
-        
-        if (result) {
-            modal.querySelector('#stepPhone').style.display = 'none';
-            modal.querySelector('#stepCode').style.display = 'block';
-            showToast('Код отправлен!', 'success');
-        }
-    });
+modal.querySelector('#sendCodeBtn').addEventListener('click', async () => {
+    // Получаем телефон из поля ввода
+    let phone = modal.querySelector('#resetPhone').value;
+    
+    // ========== НОВАЯ ЧАСТЬ: ФОРМАТИРУЕМ ТЕЛЕФОН ==========
+    // Удаляем все лишние символы, оставляем только цифры
+    let digits = phone.replace(/\D/g, '');
+    
+    // Если пользователь ввел 10 цифр (например, 9261234567)
+    if (digits.length === 10) {
+        phone = '+7' + digits;
+    }
+    // Если пользователь ввел 11 цифр и они начинаются с 7 (71234567890)
+    else if (digits.length === 11 && digits.startsWith('7')) {
+        phone = '+' + digits;
+    }
+    // Если пользователь ввел 11 цифр и они начинаются с 8 (89261234567)
+    else if (digits.length === 11 && digits.startsWith('8')) {
+        phone = '+7' + digits.substring(1);
+    }
+    // Если уже есть +7
+    else if (phone.startsWith('+7')) {
+        // оставляем как есть
+    }
+    // Если ничего не подошло, добавляем +7 вручную
+    else if (digits.length === 10) {
+        phone = '+7' + digits;
+    }
+    // ========== КОНЕЦ НОВОЙ ЧАСТИ ==========
+    
+    // Проверяем, что телефон корректный
+    if (!phone || phone.length < 12) {
+        showToast('Введите корректный телефон в формате +7XXXXXXXXXX', 'error');
+        return;
+    }
+    
+    resetPhone = phone;
+    const result = await window.auth.requestPasswordReset(phone);
+    
+    if (result) {
+        modal.querySelector('#stepPhone').style.display = 'none';
+        modal.querySelector('#stepCode').style.display = 'block';
+        showToast('Код отправлен!', 'success');
+    }
+});
     
     modal.querySelector('#verifyCodeBtn').addEventListener('click', () => {
         const code = modal.querySelector('#resetCodeInput').value;

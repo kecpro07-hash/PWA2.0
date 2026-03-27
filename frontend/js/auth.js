@@ -608,8 +608,23 @@ function showChangePasswordModal() {
 // ==================== ОБРАБОТЧИКИ ====================
 
 window.handleLogin = async function() {
-    const phone = document.getElementById('loginPhone')?.value;
+    let phone = document.getElementById('loginPhone')?.value;
+    
+    // Автоматически добавляем +7 если нужно
+    if (phone && !phone.startsWith('+')) {
+        let digits = phone.replace(/\D/g, '');
+        if (digits.length === 10) {
+            phone = '+7' + digits;
+        } else if (digits.length === 11 && digits.startsWith('7')) {
+            phone = '+' + digits;
+        } else if (digits.length === 11 && digits.startsWith('8')) {
+            phone = '+7' + digits.substring(1);
+        }
+    }
+    
     const password = document.getElementById('loginPassword')?.value;
+    
+    console.log('Отправляемый телефон для входа:', phone);
     
     const success = await window.auth.login(phone, password);
     

@@ -617,6 +617,44 @@ function scrollToElement(element, offset = 0) {
     });
 }
 
+
+
+
+
+// Форматирование телефона при вводе
+function formatPhoneInput(input) {
+    let value = input.value.replace(/\D/g, '');
+    
+    if (value.length === 0) {
+        input.value = '';
+        return;
+    }
+    
+    // Ограничиваем длину
+    if (value.length > 11) {
+        value = value.slice(0, 11);
+    }
+    
+    // Показываем пользователю в удобном формате
+    if (value.length <= 10) {
+        input.value = value;
+    } else {
+        // Для отображения показываем без +7, но при отправке добавим
+        input.value = value;
+    }
+}
+
+// Добавляем обработчик на все поля ввода телефона
+document.addEventListener('DOMContentLoaded', () => {
+    const phoneInputs = document.querySelectorAll('input[type="tel"]');
+    phoneInputs.forEach(input => {
+        input.addEventListener('input', () => formatPhoneInput(input));
+    });
+});
+
+
+
+
 // ==================== ЭКСПОРТ ====================
 
 // Делаем все функции глобальными

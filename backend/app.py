@@ -223,9 +223,12 @@ init_db()
 
 def hash_password(password):
     """Хеширует пароль с солью"""
+    import hashlib
+    import secrets
     salt = secrets.token_hex(16)
     hash_obj = hashlib.sha256((password + salt).encode()).hexdigest()
     return f"{salt}${hash_obj}"
+
 
 def verify_password(password, stored_hash):
     """Проверяет пароль"""

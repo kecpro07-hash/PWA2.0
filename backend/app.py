@@ -286,19 +286,16 @@ def health():
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """Регистрация пользователя с паролем"""
+    """Регистрация пользователя"""
     data = request.json
     
-    print(f"📝 Регистрация: name={data.get('name')}, phone={data.get('phone')}")
-    
-    # Проверка обязательных полей
     if not data.get('name') or not data.get('phone') or not data.get('password'):
         return jsonify({'error': 'Имя, телефон и пароль обязательны'}), 400
     
     if len(data['password']) < 4:
         return jsonify({'error': 'Пароль должен быть не менее 4 символов'}), 400
     
-    # Нормализуем телефон (приводим к формату +7XXXXXXXXXX)
+    # Нормализуем телефон
     phone_raw = data['phone']
     digits = ''.join(filter(str.isdigit, phone_raw))
     
@@ -308,15 +305,8 @@ def register():
         normalized_phone = '+' + digits
     elif len(digits) == 11 and digits.startswith('8'):
         normalized_phone = '+7' + digits[1:]
-    elif phone_raw.startswith('+') and len(digits) == 11:
-        normalized_phone = phone_raw
     else:
-        normalized_phone = '+7' + digits[-10:] if len(digits) >= 10 else None
-    
-    if not normalized_phone or len(normalized_phone) != 12:
-        return jsonify({'error': f'Некорректный номер телефона: {phone_raw}'}), 400
-    
-    print(f"📞 Нормализованный телефон: {normalized_phone}")
+        normalized_phone = phone_raw
     
     conn = get_db()
     if not conn:
@@ -325,29 +315,31 @@ def register():
     try:
         cur = conn.cursor()
         
-        # Проверяем существующего пользователя
+        # Проверяем существование
         cur.execute("SELECT user_id FROM users WHERE phone = %s", (normalized_phone,))
         if cur.fetchone():
             return jsonify({'error': 'Пользователь с таким телефоном уже существует'}), 400
         
-        # Генерация ID
+        # Генерируем ID
         import random
         import string
         user_id = str(random.randint(100000, 999999))
         short_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
         
         # Хешируем пароль
-        password_hash = hash_password(data['password'])
+        import hashlib
+        import secrets
+        salt = secrets.token_hex(16)
+        password_hash = f"{salt}${hashlib.sha256((data['password'] + salt).encode()).hexdigest()}"
         
-        # Создание пользователя
+        # Создаем пользователя
         cur.execute("""
             INSERT INTO users (user_id, name, phone, address, username, short_id, password_hash, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING user_id
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
         """, (user_id, data['name'], normalized_phone, data.get('address', ''), 
-              data.get('username', ''), short_id, password_hash, datetime.now()))
+              data.get('username', ''), short_id, password_hash))
         
-        # Создание бонусного счета
+        # Создаем бонусы
         cur.execute("""
             INSERT INTO bonuses (user_id, balance, total_earned, total_spent)
             VALUES (%s, 0, 0, 0)
@@ -355,33 +347,25 @@ def register():
         
         conn.commit()
         
-        # Создание токена
+        # Создаем токен
+        from flask_jwt_extended import create_access_token
         access_token = create_access_token(identity=user_id)
-        refresh_token = create_refresh_token(identity=user_id)
-        
-        # Получаем бонусы
-        cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user_id,))
-        bonus = cur.fetchone()
-        
-        print(f"✅ Пользователь создан: ID={user_id}, phone={normalized_phone}")
         
         return jsonify({
             'access_token': access_token,
-            'refresh_token': refresh_token,
             'user': {
                 'user_id': user_id,
                 'name': data['name'],
                 'phone': normalized_phone,
                 'address': data.get('address', ''),
-                'username': data.get('username', ''),
                 'short_id': short_id,
-                'bonus_balance': bonus[0] if bonus else 0
+                'bonus_balance': 0
             }
         })
         
     except Exception as e:
         conn.rollback()
-        print(f"❌ Ошибка регистрации: {e}")
+        print(f"Ошибка: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()

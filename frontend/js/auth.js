@@ -622,11 +622,27 @@ window.handleLogin = async function() {
 };
 
 window.handleRegister = async function() {
+    let phone = document.getElementById('regPhone')?.value;
+    
+    // Автоматически добавляем +7 если нужно
+    if (phone && !phone.startsWith('+')) {
+        // Удаляем все нецифровые
+        let digits = phone.replace(/\D/g, '');
+        if (digits.length === 10) {
+            phone = '+7' + digits;
+        } else if (digits.length === 11 && digits.startsWith('7')) {
+            phone = '+' + digits;
+        } else if (digits.length === 11 && digits.startsWith('8')) {
+            phone = '+7' + digits.substring(1);
+        }
+    }
+    
     const name = document.getElementById('regName')?.value;
-    const phone = document.getElementById('regPhone')?.value;
     const password = document.getElementById('regPassword')?.value;
     const confirmPassword = document.getElementById('regConfirmPassword')?.value;
     const address = document.getElementById('regAddress')?.value;
+    
+    console.log('Отправляемый телефон:', phone);
     
     const success = await window.auth.register({
         name, phone, password, confirmPassword, address

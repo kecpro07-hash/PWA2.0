@@ -370,14 +370,36 @@ def register():
     finally:
         conn.close()
 
+# ================== ВХОД В СИСТЕМУ ==================
+
 @app.route('/api/auth/login', methods=['POST'])
 def login():
+    """Вход по телефону и паролю"""
     data = request.json
-    phone = data.get('phone')
-    password = data.get('password')
     
-    if not phone or not password:
+    # Проверка наличия данных
+    if not data.get('phone') or not data.get('password'):
         return jsonify({'error': 'Телефон и пароль обязательны'}), 400
+    
+    # Нормализуем телефон (приводим к формату +7XXXXXXXXXX)
+    phone_raw = data['phone']
+    digits = ''.join(filter(str.isdigit, phone_raw))
+    
+    if len(digits) == 10:
+        normalized_phone = '+7' + digits
+    elif len(digits) == 11 and digits.startswith('7'):
+        normalized_phone = '+' + digits
+    elif len(digits) == 11 and digits.startswith('8'):
+        normalized_phone = '+7' + digits[1:]
+    elif phone_raw.startswith('+') and len(digits) == 11:
+        normalized_phone = phone_raw
+    else:
+        normalized_phone = '+7' + digits[-10:] if len(digits) >= 10 else None
+    
+    if not normalized_phone:
+        return jsonify({'error': 'Некорректный номер телефона'}), 400
+    
+    print(f"📞 Попытка входа: {normalized_phone}")
     
     conn = get_db()
     if not conn:
@@ -385,33 +407,64 @@ def login():
     
     try:
         cur = conn.cursor()
-        # Ищем пользователя по телефону
-        cur.execute("SELECT user_id, name, phone, address, username, short_id, password_hash FROM users WHERE phone = %s", (phone,))
+        
+        # Ищем пользователя по нормализованному телефону
+        cur.execute("""
+            SELECT user_id, name, phone, address, username, short_id, password_hash
+            FROM users WHERE phone = %s
+        """, (normalized_phone,))
+        
         user = cur.fetchone()
         
         if not user:
+            print(f"❌ Пользователь не найден: {normalized_phone}")
             return jsonify({'error': 'Пользователь не найден'}), 404
         
+        print(f"✅ Пользователь найден: {user[1]} (ID: {user[0]})")
+        
         # Проверка пароля
-        if not verify_password(password, user[6]):
+        if not verify_password(data['password'], user[6]):
+            print(f"❌ Неверный пароль для {normalized_phone}")
             return jsonify({'error': 'Неверный пароль'}), 401
         
-        # Создаём JWT токен
+        # Проверка бана
+        cur.execute("SELECT user_id FROM banned_users WHERE user_id = %s", (user[0],))
+        if cur.fetchone():
+            return jsonify({'error': 'Пользователь заблокирован'}), 403
+        
+        # Обновляем время последнего входа
+        cur.execute("""
+            UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = %s
+        """, (user[0],))
+        conn.commit()
+        
+        # Получаем бонусы
+        cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user[0],))
+        bonus = cur.fetchone()
+        
+        # Создаем JWT токен
+        from flask_jwt_extended import create_access_token, create_refresh_token
         access_token = create_access_token(identity=user[0])
+        refresh_token = create_refresh_token(identity=user[0])
+        
+        print(f"✅ Успешный вход: {user[1]} (ID: {user[0]})")
         
         return jsonify({
             'access_token': access_token,
+            'refresh_token': refresh_token,
             'user': {
                 'user_id': user[0],
                 'name': user[1],
                 'phone': user[2],
-                'address': user[3],
-                'username': user[4],
+                'address': user[3] or '',
+                'username': user[4] or '',
                 'short_id': user[5],
-                'bonus_balance': 0
+                'bonus_balance': bonus[0] if bonus else 0
             }
         })
+        
     except Exception as e:
+        print(f"❌ Ошибка входа: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()

@@ -372,17 +372,12 @@ def register():
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """Вход по телефону и паролю"""
     data = request.json
+    phone = data.get('phone')
+    password = data.get('password')
     
-    if not data.get('phone') or not data.get('password'):
+    if not phone or not password:
         return jsonify({'error': 'Телефон и пароль обязательны'}), 400
-    
-    # Нормализуем телефон
-    normalized_phone = normalize_phone(data['phone'])
-    
-    if not normalized_phone:
-        return jsonify({'error': 'Некорректный номер телефона'}), 400
     
     conn = get_db()
     if not conn:
@@ -390,42 +385,22 @@ def login():
     
     try:
         cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT user_id, name, phone, address, username, short_id, password_hash
-            FROM users WHERE phone = %s
-        """, (normalized_phone,))
-        
+        # Ищем пользователя по телефону
+        cur.execute("SELECT user_id, name, phone, address, username, short_id, password_hash FROM users WHERE phone = %s", (phone,))
         user = cur.fetchone()
         
         if not user:
             return jsonify({'error': 'Пользователь не найден'}), 404
         
         # Проверка пароля
-        if not verify_password(data['password'], user[6]):
+        if not verify_password(password, user[6]):
             return jsonify({'error': 'Неверный пароль'}), 401
         
-        # Проверка бана
-        cur.execute("SELECT user_id FROM banned_users WHERE user_id = %s", (user[0],))
-        if cur.fetchone():
-            return jsonify({'error': 'Пользователь заблокирован'}), 403
-        
-        # Обновляем время последнего входа
-        cur.execute("""
-            UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE user_id = %s
-        """, (user[0],))
-        conn.commit()
-        
-        # Получаем бонусы
-        cur.execute("SELECT balance FROM bonuses WHERE user_id = %s", (user[0],))
-        bonus = cur.fetchone()
-        
+        # Создаём JWT токен
         access_token = create_access_token(identity=user[0])
-        refresh_token = create_refresh_token(identity=user[0])
         
         return jsonify({
             'access_token': access_token,
-            'refresh_token': refresh_token,
             'user': {
                 'user_id': user[0],
                 'name': user[1],
@@ -433,12 +408,10 @@ def login():
                 'address': user[3],
                 'username': user[4],
                 'short_id': user[5],
-                'bonus_balance': bonus[0] if bonus else 0
+                'bonus_balance': 0
             }
         })
-        
     except Exception as e:
-        logger.error(f"Ошибка входа: {e}")
         return jsonify({'error': str(e)}), 500
     finally:
         conn.close()

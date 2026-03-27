@@ -61,7 +61,7 @@ def normalize_phone(phone):
     if len(digits) < 10:
         return None
     
-    # Если 10 цифр (например, 9123456789) - добавляем +7
+    # Если 10 цифр (например, 9261234567) -> +79261234567
     if len(digits) == 10:
         return f"+7{digits}"
     
@@ -74,25 +74,15 @@ def normalize_phone(phone):
         if digits.startswith('7'):
             return f"+7{digits}"
     
-    # Если 12 цифр и начинается с 79
-    if len(digits) == 12 and digits.startswith('79'):
+    # Если 12 цифр и начинается с 7
+    if len(digits) == 12 and digits.startswith('7'):
         return f"+{digits}"
     
     # Если уже есть +
     if phone.startswith('+'):
-        if digits.startswith('79'):
-            return phone
+        return phone
     
-    # По умолчанию возвращаем как есть
-    return phone
-
-def validate_phone(phone):
-    """Проверяет, является ли номер корректным российским номером"""
-    normalized = normalize_phone(phone)
-    if not normalized:
-        return False
-    return normalized.startswith('+7') and len(normalized) == 12
-
+    return f"+7{digits[-10:]}"  # Если ничего не подошло, берем последние 10 цифр
 # ================== БАЗА ДАННЫХ ==================
 
 def get_db():

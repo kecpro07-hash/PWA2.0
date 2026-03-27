@@ -12,7 +12,11 @@ window.CONFIG = {
     BONUS_PERCENT: 10,
     BONUS_TO_RUB: 1,
     MAX_BONUS_PERCENT: 50,
-    
+
+    // Настройки телефона
+    PHONE_PREFIX: '+7',
+    PHONE_LENGTH: 11,
+
     // Настройки времени
     MIN_PREP_TIME: 10,
     TIME_INTERVAL: 10,

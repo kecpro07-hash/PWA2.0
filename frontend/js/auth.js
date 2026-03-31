@@ -44,7 +44,24 @@ async function initAuth() {
 // ==================== ВХОД ====================
 
 async function login(phone, password) {
-    if (!phone || phone.length < 10) {
+    // Приводим телефон к единому формату
+    let digits = phone.replace(/\D/g, '');
+    
+    if (digits.length === 10) {
+        phone = '+7' + digits;
+    } else if (digits.length === 11 && digits.startsWith('7')) {
+        phone = '+' + digits;
+    } else if (digits.length === 11 && digits.startsWith('8')) {
+        phone = '+7' + digits.substring(1);
+    } else if (digits.length === 12 && digits.startsWith('79')) {
+        phone = '+' + digits;
+    } else {
+        phone = '+7' + digits.slice(-10);
+    }
+    
+    console.log('📞 login() с телефоном:', phone);
+    
+    if (!phone || phone.length < 12) {
         showToast('Введите корректный телефон', 'error');
         return false;
     }

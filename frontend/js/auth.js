@@ -639,61 +639,41 @@ function showChangePasswordModal() {
 window.handleLogin = async function() {
     let phone = document.getElementById('loginPhone')?.value;
     
-    // Автоматически добавляем +7 если нужно
-    if (phone && !phone.startsWith('+')) {
-        let digits = phone.replace(/\D/g, '');
-        if (digits.length === 10) {
-            phone = '+7' + digits;
-        } else if (digits.length === 11 && digits.startsWith('7')) {
-            phone = '+' + digits;
-        } else if (digits.length === 11 && digits.startsWith('8')) {
-            phone = '+7' + digits.substring(1);
-        }
+    if (!phone) {
+        showToast('Введите телефон', 'error');
+        return;
+    }
+    
+    // ОЧИЩАЕМ телефон от всех символов, оставляем только цифры
+    let digits = phone.replace(/\D/g, '');
+    
+    // Приводим к формату +7XXXXXXXXXX (12 символов)
+    if (digits.length === 10) {
+        phone = '+7' + digits;
+    } else if (digits.length === 11 && digits.startsWith('7')) {
+        phone = '+' + digits;
+    } else if (digits.length === 11 && digits.startsWith('8')) {
+        phone = '+7' + digits.substring(1);
+    } else if (digits.length === 12 && digits.startsWith('79')) {
+        phone = '+' + digits;
+    } else {
+        // Если формат непонятный, пробуем добавить +7
+        phone = '+7' + digits.slice(-10);
     }
     
     const password = document.getElementById('loginPassword')?.value;
     
-    console.log('Отправляемый телефон для входа:', phone);
+    if (!password) {
+        showToast('Введите пароль', 'error');
+        return;
+    }
+    
+    console.log('📞 Вход с телефоном:', phone);
     
     const success = await window.auth.login(phone, password);
     
     if (success) {
         const modal = document.getElementById('authModal');
-        if (modal) modal.remove();
-        if (typeof loadPage === 'function') loadPage('main');
-        else window.location.reload();
-    }
-};
-
-window.handleRegister = async function() {
-    let phone = document.getElementById('regPhone')?.value;
-    
-    // Автоматически добавляем +7 если нужно
-    if (phone && !phone.startsWith('+')) {
-        // Удаляем все нецифровые
-        let digits = phone.replace(/\D/g, '');
-        if (digits.length === 10) {
-            phone = '+7' + digits;
-        } else if (digits.length === 11 && digits.startsWith('7')) {
-            phone = '+' + digits;
-        } else if (digits.length === 11 && digits.startsWith('8')) {
-            phone = '+7' + digits.substring(1);
-        }
-    }
-    
-    const name = document.getElementById('regName')?.value;
-    const password = document.getElementById('regPassword')?.value;
-    const confirmPassword = document.getElementById('regConfirmPassword')?.value;
-    const address = document.getElementById('regAddress')?.value;
-    
-    console.log('Отправляемый телефон:', phone);
-    
-    const success = await window.auth.register({
-        name, phone, password, confirmPassword, address
-    });
-    
-    if (success) {
-        const modal = document.getElementById('registerModal');
         if (modal) modal.remove();
         if (typeof loadPage === 'function') loadPage('main');
         else window.location.reload();

@@ -6,7 +6,7 @@ window.CONFIG = {
     APP_VERSION: '1.0.0',
     
     //ID администратора (для админ-панели)
-    ADMIN_ID: '570090',
+    ADMIN_ID: '453633',
     
     // Настройки бонусов
     BONUS_PERCENT: 10,
